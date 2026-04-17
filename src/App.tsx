@@ -43,10 +43,11 @@ interface Project {
   enhancedImage: string;
   noBgImage?: string;
   tryOnImage?: string;
-  videoUrl?: string;
   modelVariations?: string[];
   environments?: string[];
   templateId?: string;
+  templateName?: string;
+  aspectRatio?: string;
   timestamp: number;
 }
 
@@ -64,7 +65,7 @@ interface Template {
 const getAI = () => {
   const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    throw new Error("API Key is not configured. Please ensure GEMINI_API_KEY is set or select a key in settings.");
+    throw new Error("API Key is not configured. Please select an API key from the settings menu (gear icon) to enable AI features.");
   }
   return new GoogleGenAI({ apiKey });
 };
@@ -77,16 +78,51 @@ export default function App() {
   const [isTryingOn, setIsTryingOn] = useState(false);
   const [variationProgress, setVariationProgress] = useState<{current: number, total: number} | null>(null);
   const [isGeneratingEnv, setIsGeneratingEnv] = useState(false);
+  const [retryStatus, setRetryStatus] = useState<string | null>(null);
   const [selectedModelVarIndex, setSelectedModelVarIndex] = useState<number | null>(null);
   const [view, setView] = useState<'home' | 'editor'>('home');
   const [bgColor, setBgColor] = useState<string>('transparent');
-  const [activeTab, setActiveTab] = useState<'enhanced' | 'noBg' | 'tryOn' | 'environment' | 'video'>('enhanced');
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('general');
+  const [activeTab, setActiveTab] = useState<'enhanced' | 'noBg' | 'tryOn' | 'environment'>('enhanced');
+  const [selectedTemplateIds, setSelectedTemplateIds] = useState<string[]>(['general']);
+  const [isBatchProcessing, setIsBatchProcessing] = useState(false);
+  const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
+  const [batchComplete, setBatchComplete] = useState(false);
   const [envPrompt, setEnvPrompt] = useState('');
   const [selectedEnvIndex, setSelectedEnvIndex] = useState<number | null>(null);
   const [selectedEnvCategory, setSelectedEnvCategory] = useState<string>('All');
-  const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
-  const [videoProgress, setVideoProgress] = useState<string>('');
+  const [apiStatus, setApiStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle');
+  const [apiErrorMessage, setApiErrorMessage] = useState<string | null>(null);
+
+  // Test API connection on mount and when key might have changed
+  useEffect(() => {
+    const testConnection = async () => {
+      setApiStatus('testing');
+      try {
+        const ai = getAI();
+        // Use a very lightweight model for testing
+        await ai.models.generateContent({
+          model: 'gemini-3-flash-preview',
+          contents: [{ parts: [{ text: 'ping' }] }],
+          config: { maxOutputTokens: 1 }
+        });
+        setApiStatus('ok');
+        setApiErrorMessage(null);
+      } catch (err: any) {
+        console.error("API Connection Test Failed:", err);
+        setApiStatus('error');
+        const errStr = JSON.stringify(err).toLowerCase();
+        if (errStr.includes("403") || errStr.includes("permission_denied")) {
+          setApiErrorMessage("Your API key doesn't have permission for these models. Please switch to a key with 'Gemini Ecosystem' access.");
+        } else if (errStr.includes("429") || errStr.includes("quota")) {
+          setApiErrorMessage("API Quota exceeded. Please wait or switch keys.");
+        } else {
+          setApiErrorMessage(err?.message || "API connection failed.");
+        }
+      }
+    };
+
+    testConnection();
+  }, []);
   const [error, setError] = useState<{ message: string; suggestion?: string; onRetry?: () => void; isQuota?: boolean } | null>(null);
   const [cooldown, setCooldown] = useState<number>(0);
   
@@ -128,7 +164,7 @@ export default function App() {
     sharpen: 0
   });
 
-  const [selectedAspectRatio, setSelectedAspectRatio] = useState<'1:1' | '16:9' | '9:16'>('1:1');
+  const [selectedAspectRatios, setSelectedAspectRatios] = useState<('1:1' | '16:9' | '9:16')[]>(['1:1']);
 
   const aspectRatioOptions = [
     { id: '1:1', label: 'Square', icon: <div className="w-3 h-3 border border-current rounded-sm" /> },
@@ -220,9 +256,27 @@ export default function App() {
     { name: 'Neon Cyberpunk', prompt: 'a dark reflective surface with vibrant neon blue and purple ambient lighting', category: 'Tech' },
     { name: 'Circuit Board', prompt: 'a futuristic glowing circuit board surface with green data streams', category: 'Tech' },
     { name: 'Glass Lab', prompt: 'a clean white laboratory setting with frosted glass and surgical precision lighting', category: 'Tech' },
+    
+    { name: 'Jewelry Showroom', prompt: 'a high-end luxury jewelry showroom with elegant glass displays and soft premium lighting', category: 'Events' },
+    { name: 'Royal Wedding', prompt: 'a grand royal wedding hall with ornate gold decorations, floral arrangements, and majestic lighting', category: 'Events' },
+    { name: 'Marriage Stage', prompt: 'a beautifully decorated traditional marriage stage with vibrant flowers and celebratory lighting', category: 'Events' },
+    { name: 'Banquet Hall', prompt: 'a sophisticated banquet hall with crystal chandeliers and elegant table settings', category: 'Events' },
   ];
 
   const templates: Template[] = [
+    { 
+      id: 'studio-softbox', 
+      name: 'Studio Softbox', 
+      description: 'Professional softbox lighting for multiple items.',
+      icon: <Sparkles className="w-4 h-4" />,
+      prompt: 'Enhance this product photo using professional studio softbox lighting. This mode is specifically designed for multiple items. Ensure all items are clearly visible with soft, even lighting and professional grey studio background. Maintain high clarity and identical item appearance.',
+      suggestedBgs: ['transparent', 'white', 'grey'],
+      envSuggestions: ['infinite grey studio', 'white sweep background', 'minimalist commercial set'],
+      categoryPresets: [
+        { name: 'Pure White', prompt: 'a seamless pure white studio background with soft natural shadows and high-key lighting' },
+        { name: 'Technical Grey', prompt: 'a professional technical grey studio background with precise softbox gradients' }
+      ]
+    },
     { 
       id: 'general', 
       name: 'General', 
@@ -336,7 +390,7 @@ export default function App() {
     }
   ];
 
-  const currentTemplate = templates.find(t => t.id === (currentProject?.templateId || selectedTemplateId)) || templates[0];
+  const currentTemplate = templates.find(t => t.id === (currentProject?.templateId || selectedTemplateIds[0])) || templates[0];
 
   const bgOptions = [
     { id: 'transparent', label: 'Transparent', color: 'transparent' },
@@ -402,26 +456,37 @@ export default function App() {
   const handleAIError = (error: any, context: string, onRetry?: () => void) => {
     console.error(`${context} failed:`, error);
     
-    let message = `${context} failed. Please try again.`;
+    const errorStr = typeof error === 'string' ? error : JSON.stringify(error);
+    let message = error?.message || (typeof error === 'string' ? error : `${context} failed. Please try again.`);
+    
+    if (message.includes('{"error":')) {
+      try {
+        const parsed = JSON.parse(message.substring(message.indexOf('{')));
+        message = parsed.error?.message || message;
+      } catch (e) {
+        // ignore
+      }
+    }
+    
     let suggestion = "";
     let isQuota = false;
     
     // Check for 429 Resource Exhausted or other specific errors
-    const errorStr = JSON.stringify(error);
-    if (errorStr.includes("RESOURCE_EXHAUSTED") || errorStr.includes("429")) {
+    const errorStrLower = errorStr.toLowerCase();
+    if (errorStrLower.includes("resource_exhausted") || errorStrLower.includes("429")) {
       message = "AI Quota Exceeded";
-      suggestion = "You've reached the rate limit for AI requests. Please wait a moment before retrying.";
+      suggestion = "You've reached the rate limit for the free AI tier. You can wait a moment, or select a different API key from the settings menu to continue.";
       isQuota = true;
-      setCooldown(15); // 15 second cooldown for quota errors
-    } else if (errorStr.includes("SAFETY")) {
+      setCooldown(30);
+    } else if (errorStrLower.includes("safety")) {
       message = "AI Safety Filter";
       suggestion = "This request was blocked by safety filters. Please try a different image or prompt.";
-    } else if (errorStr.includes("INVALID_ARGUMENT")) {
+    } else if (errorStrLower.includes("invalid_argument")) {
       message = "AI Error: Invalid request";
       suggestion = "Please ensure your photo is clear and try again.";
-    } else if (errorStr.includes("PERMISSION_DENIED") || errorStr.includes("403")) {
+    } else if (errorStrLower.includes("permission_denied") || errorStrLower.includes("403")) {
       message = "API Permission Denied";
-      suggestion = "This model requires a valid API key with billing enabled. Please select a different key from the settings menu.";
+      suggestion = "Your current API key is restricted and cannot access the high-quality image models. Please click 'Switch API Key' and select a key from a different project (e.g., a paid project or one with full Gemini access).";
       const aistudio = (window as any).aistudio;
       if (aistudio) {
         aistudio.openSelectKey();
@@ -449,34 +514,86 @@ export default function App() {
     let lastError: any;
     for (let i = 0; i < maxRetries; i++) {
       try {
+        setRetryStatus(null);
         return await operation();
       } catch (err: any) {
         lastError = err;
-        const errorStr = JSON.stringify(err);
-        if (errorStr.includes("RESOURCE_EXHAUSTED") || errorStr.includes("429")) {
+        const errorStr = JSON.stringify(err).toLowerCase();
+        if (errorStr.includes("resource_exhausted") || errorStr.includes("429") || errorStr.includes("overloaded") || errorStr.includes("deadline_exceeded")) {
           if (i < maxRetries - 1) {
             // Exponential backoff with jitter and longer base delay
-            const baseDelay = Math.pow(2, i + 2) * 1000; // 4s, 8s, 16s, 32s, 64s, 128s, 256s
+            const baseDelay = Math.pow(2, i + 1) * 2000; // 4s, 8s, 16s, 32s, 64s...
             const jitter = Math.random() * 2000;
             const delay = baseDelay + jitter;
-            console.warn(`${context} quota hit, retrying in ${Math.round(delay)}ms... (Attempt ${i + 1}/${maxRetries})`);
+            const waitTime = Math.round(delay/1000);
+            console.warn(`${context} quota hit, retrying in ${waitTime}s... (Attempt ${i + 1}/${maxRetries})`);
+            setRetryStatus(`Quota hit (${i + 1}/${maxRetries}). Retrying in ${waitTime}s...`);
             await new Promise(resolve => setTimeout(resolve, delay));
             continue;
           }
         }
+        setRetryStatus(null);
         throw err;
       }
     }
+    setRetryStatus(null);
     throw lastError;
   };
 
-  const enhanceImage = async (input: File | string) => {
-    setIsProcessing(true);
-    setView('editor');
+  const handleBatchUpload = async (files: File[]) => {
+    if (files.length === 0) return;
+    
+    // If only one file and only one template/aspect ratio choice, go to editor (old behavior)
+    if (files.length === 1 && selectedTemplateIds.length === 1 && selectedAspectRatios.length === 1) {
+      enhanceImage(files[0]);
+      return;
+    }
+
+    setIsBatchProcessing(true);
+    const totalTasks = files.length * selectedTemplateIds.length * selectedAspectRatios.length;
+    setBatchProgress({ current: 0, total: totalTasks });
+    
+    let completedCount = 0;
+    
+    // Create all tasks first
+    const tasks: { file: File, templateId: string, aspectRatio: '1:1' | '16:9' | '9:16' }[] = [];
+    files.forEach(file => {
+      selectedTemplateIds.forEach(templateId => {
+        selectedAspectRatios.forEach(aspectRatio => {
+          tasks.push({ file, templateId, aspectRatio });
+        });
+      });
+    });
+
+    // Process tasks
+    await Promise.all(tasks.map(async (task) => {
+      try {
+        await enhanceImage(task.file, false, true, task.templateId, task.aspectRatio);
+      } catch (err) {
+        console.error(`Batch processing failed for a task:`, err);
+      } finally {
+        completedCount++;
+        setBatchProgress({ current: completedCount, total: totalTasks });
+      }
+    }));
+    
+    setIsBatchProcessing(false);
+    setBatchProgress({ current: 0, total: 0 });
+    setBatchComplete(true);
+    setTimeout(() => setBatchComplete(false), 5000);
+  };
+
+  const enhanceImage = async (input: File | string, useFallback = false, isBatch = false, overrideTemplateId?: string, overrideAspectRatio?: '1:1' | '16:9' | '9:16') => {
+    if (!isBatch) {
+      setIsProcessing(true);
+      setView('editor');
+    }
     setBgColor('transparent');
     setActiveTab('enhanced');
     
-    const template = templates.find(t => t.id === selectedTemplateId) || templates[0];
+    const templateId = overrideTemplateId || selectedTemplateIds[0] || 'general';
+    const aspectRatio = overrideAspectRatio || selectedAspectRatios[0] || '1:1';
+    const template = templates.find(t => t.id === templateId) || templates[0];
     
     try {
       const ai = getAI();
@@ -494,9 +611,49 @@ export default function App() {
 
       const base64Content = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
 
+      // Validation check for multiple jewelry items
+      if (templateId !== 'studio-softbox') {
+        try {
+          const validationResponse = await callAIWithRetry(() => ai.models.generateContent({
+            model: 'gemini-2.0-flash',
+            contents: {
+              parts: [
+                {
+                  inlineData: {
+                    data: base64Content,
+                    mimeType: mimeType,
+                  },
+                },
+                {
+                  text: "Analyze this image. Does it contain more than one distinct jewelry item (e.g. multiple rings, multiple necklaces, multiple pairs of earrings)? Reply with EXACTLY 'YES' or 'NO'.",
+                },
+              ],
+            },
+            config: {
+              maxOutputTokens: 5,
+              temperature: 0,
+            }
+          }), "Validation");
+
+          const validationText = validationResponse.candidates?.[0]?.content?.parts?.[0]?.text;
+          const result = validationText?.trim().toUpperCase();
+          if (result === 'YES') {
+            throw new Error(`Multiple jewelry items detected in an image. Please use 'Studio Softbox' for multiple items. (Template: ${template.name})`);
+          }
+        } catch (vErr: any) {
+          if (vErr.message?.includes("Multiple jewelry items detected")) {
+            throw vErr;
+          }
+          console.warn("Validation check failed, continuing enhancement:", vErr);
+        }
+      }
+
       // Call Gemini to "enhance" the image
+      // Fallback to 2.5 if 3.1 fails with permission error
+      const modelName = useFallback ? 'gemini-2.5-flash-image' : 'gemini-3.1-flash-image-preview';
+      
       const response = await callAIWithRetry(() => ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
+        model: modelName,
         contents: {
           parts: [
             {
@@ -510,7 +667,13 @@ export default function App() {
             },
           ],
         },
-      }), "Image enhancement");
+        config: modelName.includes('3.1') ? {
+          imageConfig: {
+            imageSize: "1K",
+            aspectRatio: aspectRatio
+          }
+        } : undefined
+      }), `Image enhancement (${useFallback ? 'Standard' : 'Pro'})`, 10);
 
       let enhancedImageBase64 = '';
       if (response.candidates?.[0]?.content?.parts) {
@@ -531,17 +694,27 @@ export default function App() {
         id: Math.random().toString(36).substring(7),
         originalImage: base64Data,
         enhancedImage: enhancedImageBase64,
-        templateId: selectedTemplateId,
+        templateId: templateId,
+        templateName: template.name,
+        aspectRatio: aspectRatio,
         timestamp: Date.now(),
       };
 
       setProjects(prev => [newProject, ...prev]);
       setCurrentProject(newProject);
     } catch (error: any) {
-      handleAIError(error, "Enhancement", () => enhanceImage(input));
-      setView('home');
+      const errorStr = JSON.stringify(error).toLowerCase();
+      if (!useFallback && (errorStr.includes("403") || errorStr.includes("permission_denied"))) {
+        console.warn("Pro model permission denied, falling back to Standard model...");
+        enhanceImage(input, true, isBatch);
+        return;
+      }
+      handleAIError(error, "Enhancement", () => enhanceImage(input, false, isBatch));
+      if (!isBatch) setView('home');
     } finally {
-      setIsProcessing(false);
+      if (!isBatch) {
+        setIsProcessing(false);
+      }
     }
   };
 
@@ -575,7 +748,7 @@ export default function App() {
             },
           ],
         },
-      }), "Background removal");
+      }), "Background removal", 10);
 
       let processedImage = '';
       if (response.candidates?.[0]?.content?.parts) {
@@ -628,7 +801,7 @@ export default function App() {
             },
           ],
         },
-      }), "Model try-on");
+      }), "Model try-on", 10);
 
       let processedImage = '';
       if (response.candidates?.[0]?.content?.parts) {
@@ -688,7 +861,7 @@ export default function App() {
                 { text: prompt }
               ]
             }
-          }), `Variation ${i + 1}`);
+          }), `Variation ${i + 1}`, 10);
 
           if (res.candidates?.[0]?.content?.parts) {
             for (const part of res.candidates[0].content.parts) {
@@ -754,10 +927,10 @@ export default function App() {
         },
         config: {
           imageConfig: {
-            aspectRatio: selectedAspectRatio
+            aspectRatio: selectedAspectRatios[0]
           }
         } as any
-      }), "Environment generation");
+      }), "Environment generation", 10);
 
       let processedImage = '';
       if (response.candidates?.[0]?.content?.parts) {
@@ -811,10 +984,10 @@ export default function App() {
             },
             config: {
               imageConfig: {
-                aspectRatio: selectedAspectRatio
+                aspectRatio: selectedAspectRatios[0]
               }
             } as any
-          }), `Suggestion: ${prompt}`);
+          }), `Suggestion: ${prompt}`, 10);
 
           if (res.candidates?.[0]?.content?.parts) {
             for (const part of res.candidates[0].content.parts) {
@@ -825,8 +998,8 @@ export default function App() {
             }
           }
           
-          // Small delay between requests to be safe
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          // Larger delay between requests to avoid rate limits
+          await new Promise(resolve => setTimeout(resolve, 3000));
         } catch (err) {
           console.warn(`Failed to generate suggestion for prompt: ${prompt}`, err);
           // If we hit a rate limit, stop the loop early but keep what we have
@@ -851,103 +1024,28 @@ export default function App() {
     }
   };
 
-  const generateVideo = async () => {
-    if (!currentProject) return;
-
-    try {
-      // Check for API key selection for paid models
-      const aistudio = (window as any).aistudio;
-      if (aistudio) {
-        const hasKey = await aistudio.hasSelectedApiKey();
-        if (!hasKey) {
-          await aistudio.openSelectKey();
-          // Proceed assuming success as per skill guidance
-        }
-      }
-
-      setIsGeneratingVideo(true);
-      setVideoProgress('Initializing AI Video Engine...');
-
-      const ai = getAI();
-      const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || '';
-      
-      const prompt = `A professional cinematic product showcase video of this product. Smooth camera pan, high-end studio lighting, 4k detail, professional commercial aesthetic. ${currentTemplate.prompt}`;
-      
-      const base64Data = currentProject.enhancedImage.split(',')[1];
-
-      setVideoProgress('Generating cinematic sequence...');
-      let operation = await (ai.models as any).generateVideos({
-        model: 'veo-3.1-generate-preview',
-        prompt,
-        image: {
-          imageBytes: base64Data,
-          mimeType: 'image/png',
-        },
-        config: {
-          numberOfVideos: 1,
-          resolution: '1080p',
-          aspectRatio: '16:9'
-        }
-      });
-
-      while (!operation.done) {
-        setVideoProgress('AI is rendering frames...');
-        await new Promise(resolve => setTimeout(resolve, 5000));
-        operation = await (ai.operations as any).getVideosOperation({ operation });
-      }
-
-      setVideoProgress('Finalizing video file...');
-      const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
-      
-      if (!downloadLink) {
-        throw new Error("Video generation failed: No download link received.");
-      }
-
-      // Fetch the video with the API key
-      const response = await fetch(downloadLink, {
-        method: 'GET',
-        headers: {
-          'x-goog-api-key': apiKey,
-        },
-      });
-
-      if (!response.ok) {
-        if (response.status === 404) {
-          // Handle "Requested entity was not found" by resetting key as per skill
-          if (aistudio) await aistudio.openSelectKey();
-          throw new Error("Video resource not found. Please try again with a valid API key.");
-        }
-        if (response.status === 403) {
-          if (aistudio) await aistudio.openSelectKey();
-          throw new Error("Permission denied. This model requires a valid API key with billing enabled.");
-        }
-        throw new Error(`Failed to download video: ${response.statusText}`);
-      }
-
-      const blob = await response.blob();
-      const videoUrl = URL.createObjectURL(blob);
-
-      const updatedProject = {
-        ...currentProject,
-        videoUrl
-      };
-
-      setCurrentProject(updatedProject);
-      setProjects(prev => prev.map(p => p.id === currentProject.id ? updatedProject : p));
-    } catch (error: any) {
-      handleAIError(error, "Video generation", () => generateVideo());
-    } finally {
-      setIsGeneratingVideo(false);
-      setVideoProgress('');
-    }
-  };
-
   const deleteProject = (id: string) => {
     setProjects(prev => prev.filter(p => p.id !== id));
     if (currentProject?.id === id) {
       setCurrentProject(null);
       setView('home');
     }
+  };
+
+  const downloadAllProjects = async () => {
+    const JSZip = (await import('jszip')).default;
+    const zip = new JSZip();
+    
+    for (const project of projects) {
+      const base64Data = project.enhancedImage.split(',')[1];
+      zip.file(`studioflyr-${project.id}.png`, base64Data, { base64: true });
+    }
+    
+    const content = await zip.generateAsync({ type: 'blob' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(content);
+    link.download = `studioflyr-batch-${Date.now()}.zip`;
+    link.click();
   };
 
   const downloadImage = () => {
@@ -962,14 +1060,6 @@ export default function App() {
           : activeTab === 'noBg' && currentProject.noBgImage 
           ? currentProject.noBgImage 
           : currentProject.enhancedImage;
-
-    if (activeTab === 'video' && currentProject.videoUrl) {
-      const link = document.createElement('a');
-      link.href = currentProject.videoUrl;
-      link.download = `studioflyr-video-${currentProject.id}.mp4`;
-      link.click();
-      return;
-    }
 
     const img = new Image();
     img.onload = () => {
@@ -1029,6 +1119,18 @@ export default function App() {
                     {cooldown > 0 ? `Retry in ${cooldown}s` : "Retry Now"}
                   </button>
                 )}
+                {error.isQuota && (
+                  <button 
+                    onClick={() => {
+                      const aistudio = (window as any).aistudio;
+                      if (aistudio) aistudio.openSelectKey();
+                    }}
+                    className="mt-2 text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-lg bg-white text-black hover:bg-neutral-200 transition-all flex items-center gap-1.5 ml-2"
+                  >
+                    <Smartphone className="w-3 h-3" />
+                    Switch API Key
+                  </button>
+                )}
               </div>
               <button 
                 onClick={() => setError(null)}
@@ -1042,16 +1144,28 @@ export default function App() {
       </AnimatePresence>
 
       {/* Header */}
-      <header className="fixed top-0 left-0 right-0 z-40 bg-black/50 backdrop-blur-xl border-bottom border-neutral-900">
-        <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
+      <header className="fixed top-0 left-0 right-0 z-40 bg-black/50 backdrop-blur-xl border-b border-neutral-900">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 sm:h-20 flex items-center justify-between">
           <div 
-            className="flex items-center gap-3 cursor-pointer group"
+            className="flex items-center gap-2 sm:gap-3 cursor-pointer group"
             onClick={() => setView('home')}
           >
-            <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center group-hover:rotate-12 transition-transform duration-500">
-              <Sparkles className="w-6 h-6 text-black" />
+            <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-white flex items-center justify-center group-hover:rotate-12 transition-transform duration-500">
+              <Sparkles className="w-5 h-5 sm:w-6 sm:h-6 text-black" />
             </div>
-            <span className="text-xl font-bold tracking-tighter uppercase">StudioFlyr</span>
+            <span className="text-lg sm:text-xl font-bold tracking-tighter uppercase">StudioFlyr</span>
+            {apiStatus === 'error' && (
+              <div className="hidden sm:flex items-center gap-2 px-3 py-1 rounded-full bg-red-500/10 border border-red-500/20 text-[10px] font-bold text-red-500 uppercase tracking-widest animate-pulse">
+                <AlertCircle className="w-3 h-3" />
+                API Error
+              </div>
+            )}
+            {apiStatus === 'testing' && (
+              <div className="hidden sm:flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-[10px] font-bold text-blue-500 uppercase tracking-widest">
+                <RefreshCw className="w-3 h-3 animate-spin" />
+                Connecting...
+              </div>
+            )}
           </div>
 
           <nav className="hidden md:flex items-center gap-8">
@@ -1072,17 +1186,18 @@ export default function App() {
             </button>
           </nav>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 sm:gap-4">
             {view === 'editor' && (
               <button 
                 onClick={() => setView('home')}
-                className="flex items-center gap-2 px-4 py-2 rounded-full bg-neutral-900 border border-neutral-800 text-sm font-medium hover:bg-neutral-800 transition-all"
+                className="flex items-center gap-2 px-3 sm:px-4 py-2 rounded-full bg-neutral-900 border border-neutral-800 text-xs sm:text-sm font-medium hover:bg-neutral-800 transition-all"
               >
-                <Plus className="w-4 h-4" />
-                New Project
+                <Plus className="w-3 h-3 sm:w-4 sm:h-4" />
+                <span className="hidden sm:inline">New Project</span>
+                <span className="sm:hidden">New</span>
               </button>
             )}
-            <div className="w-10 h-10 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center overflow-hidden">
+            <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center overflow-hidden">
               <img 
                 src="https://picsum.photos/seed/user/100/100" 
                 alt="User" 
@@ -1094,7 +1209,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="pt-32 pb-20 px-6 max-w-7xl mx-auto">
+      <main className="pt-24 sm:pt-32 pb-12 sm:pb-20 px-4 sm:px-6 max-w-7xl mx-auto">
         <AnimatePresence mode="wait">
           {view === 'home' ? (
             <motion.div 
@@ -1105,79 +1220,136 @@ export default function App() {
               className="space-y-16"
             >
               {/* Hero / Upload Section */}
-              <section className="flex flex-col items-center text-center space-y-12">
+              <section className="flex flex-col items-center text-center space-y-8 sm:space-y-12">
                 <div className="space-y-4 max-w-2xl">
                   <motion.div 
                     initial={{ scale: 0.9, opacity: 0 }}
                     animate={{ scale: 1, opacity: 1 }}
                     transition={{ delay: 0.2 }}
-                    className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] uppercase tracking-[0.2em] font-bold text-white/50"
+                    className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[9px] sm:text-[10px] uppercase tracking-[0.2em] font-bold text-white/50"
                   >
                     <Sparkles className="w-3 h-3" />
-                    Powered by Gemini 2.5
+                    Powered by Gemini 3.1
                   </motion.div>
-                  <h1 className="text-5xl md:text-7xl font-bold tracking-tight leading-[0.9]">
+                  <h1 className="text-4xl sm:text-5xl md:text-7xl font-bold tracking-tight leading-[0.9]">
                     Studio Quality <br />
                     <span className="text-neutral-500">In One Click.</span>
                   </h1>
                 </div>
 
                 {/* Template Selection */}
-                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 w-full max-w-5xl">
-                  {templates.map((t) => (
-                    <button
-                      key={t.id}
-                      onClick={() => setSelectedTemplateId(t.id)}
-                      className={cn(
-                        "flex flex-col items-center gap-3 p-6 rounded-3xl border transition-all text-center group relative overflow-hidden",
-                        selectedTemplateId === t.id 
-                          ? "bg-white text-black border-white shadow-[0_0_40px_rgba(255,255,255,0.1)]" 
-                          : "bg-neutral-900/50 text-neutral-400 border-neutral-800 hover:border-neutral-700 hover:bg-neutral-900"
-                      )}
-                    >
-                      {selectedTemplateId === t.id && (
-                        <motion.div 
-                          layoutId="active-template"
-                          className="absolute inset-0 bg-white"
-                          transition={{ type: "spring", bounce: 0.2, duration: 0.6 }}
-                        />
-                      )}
-                      
-                      <div className={cn(
-                        "relative z-10 w-12 h-12 rounded-2xl flex items-center justify-center transition-colors duration-500",
-                        selectedTemplateId === t.id ? "bg-black text-white" : "bg-neutral-800 text-neutral-400 group-hover:bg-neutral-700"
-                      )}>
-                        {t.icon}
-                      </div>
-                      
-                      <div className="relative z-10 space-y-1">
-                        <p className="font-bold text-sm tracking-tight">{t.name}</p>
-                        <p className={cn(
-                          "text-[10px] leading-tight opacity-60",
-                          selectedTemplateId === t.id ? "text-black" : "text-neutral-500"
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4 w-full max-w-5xl">
+                  {templates.map((t) => {
+                    const isSelected = selectedTemplateIds.includes(t.id);
+                    return (
+                      <button
+                        key={t.id}
+                        onClick={() => {
+                          setSelectedTemplateIds(prev => {
+                            if (prev.includes(t.id)) {
+                              if (prev.length === 1) return prev; // Keep at least one
+                              return prev.filter(id => id !== t.id);
+                            }
+                            return [...prev, t.id];
+                          });
+                        }}
+                        className={cn(
+                          "flex flex-col items-center gap-2 sm:gap-3 p-4 sm:p-6 rounded-2xl sm:rounded-3xl border transition-all text-center group relative overflow-hidden",
+                          isSelected 
+                            ? "bg-white text-black border-white shadow-[0_0_40px_rgba(255,255,255,0.1)]" 
+                            : "bg-neutral-900/50 text-neutral-400 border-neutral-800 hover:border-neutral-700 hover:bg-neutral-900"
+                        )}
+                      >
+                        {isSelected && (
+                          <motion.div 
+                            layoutId={t.id + "-active-dot"}
+                            className="absolute top-2 right-2 w-2 h-2 rounded-full bg-black z-20"
+                          />
+                        )}
+                        
+                        {isSelected && (
+                          <motion.div 
+                            layoutId="active-bg"
+                            className="absolute inset-0 bg-white"
+                            transition={{ type: "spring", bounce: 0.2, duration: 0.6 }}
+                          />
+                        )}
+                        
+                        <div className={cn(
+                          "relative z-10 w-10 h-10 sm:w-12 sm:h-12 rounded-xl sm:rounded-2xl flex items-center justify-center transition-colors duration-500",
+                          isSelected ? "bg-black text-white" : "bg-neutral-800 text-neutral-400 group-hover:bg-neutral-700"
                         )}>
-                          {t.description}
-                        </p>
-                      </div>
-                    </button>
-                  ))}
+                          {t.icon}
+                        </div>
+                        
+                        <div className="relative z-10 space-y-0.5 sm:space-y-1">
+                          <p className="font-bold text-xs sm:text-sm tracking-tight">{t.name}</p>
+                          <p className={cn(
+                            "text-[9px] sm:text-[10px] leading-tight opacity-60",
+                            isSelected ? "text-black" : "text-neutral-500"
+                          )}>
+                            {t.description}
+                          </p>
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
 
-                <UploadZone onUpload={enhanceImage} isProcessing={isProcessing} />
+                {batchComplete && (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="w-full max-w-2xl p-4 bg-green-500/10 border border-green-500/20 rounded-2xl flex items-center justify-center gap-3"
+                  >
+                    <Sparkles className="w-4 h-4 text-green-500" />
+                    <span className="text-sm font-medium text-green-500">Batch processing complete! All images added to your feed.</span>
+                  </motion.div>
+                )}
+
+                {isBatchProcessing && (
+                  <div className="w-full max-w-2xl p-6 bg-neutral-900 border border-neutral-800 rounded-3xl space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <Loader2 className="w-5 h-5 text-white animate-spin" />
+                        <span className="text-sm font-medium">Processing Batch...</span>
+                      </div>
+                      <span className="text-xs font-bold text-neutral-500">
+                        {batchProgress.current} / {batchProgress.total}
+                      </span>
+                    </div>
+                    <div className="w-full h-2 bg-neutral-800 rounded-full overflow-hidden">
+                      <motion.div 
+                        initial={{ width: 0 }}
+                        animate={{ width: `${(batchProgress.current / batchProgress.total) * 100}%` }}
+                        className="h-full bg-white shadow-[0_0_10px_rgba(255,255,255,0.5)]"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <UploadZone onUpload={handleBatchUpload} isProcessing={isProcessing || isBatchProcessing} />
               </section>
 
               {/* Projects Feed */}
               {projects.length > 0 && (
-                <section className="space-y-8">
-                  <div className="flex items-center justify-between border-b border-neutral-900 pb-6">
+                <section className="space-y-6 sm:space-y-8">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between border-b border-neutral-900 pb-6 gap-4">
                     <div className="flex items-center gap-3">
                       <History className="w-5 h-5 text-neutral-500" />
-                      <h2 className="text-xl font-medium tracking-tight">Recent Projects</h2>
+                      <h2 className="text-lg sm:text-xl font-medium tracking-tight">Recent Projects</h2>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 w-full sm:w-auto">
+                      <button 
+                        onClick={downloadAllProjects}
+                        className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-white text-black hover:bg-neutral-200 transition-all text-[10px] font-bold uppercase tracking-widest"
+                      >
+                        <Download className="w-4 h-4" />
+                        Download All
+                      </button>
                       <button 
                         onClick={() => projects.length > 0 && deleteProject(projects[0].id)}
-                        className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-all text-xs font-bold uppercase tracking-widest"
+                        className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-all text-[10px] font-bold uppercase tracking-widest"
                         title="Delete most recent project"
                       >
                         <Trash2 className="w-4 h-4" />
@@ -1190,17 +1362,21 @@ export default function App() {
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-                    {projects.map(project => (
-                      <ProjectCard 
-                        key={project.id}
-                        {...project}
-                        onDelete={deleteProject}
-                        onClick={() => {
-                          setCurrentProject(project);
-                          setView('editor');
-                        }}
-                      />
-                    ))}
+                    {projects.map(project => {
+                      const template = templates.find(t => t.id === project.templateId);
+                      return (
+                        <ProjectCard 
+                          key={project.id}
+                          {...project}
+                          templateName={project.templateName || template?.name}
+                          onDelete={deleteProject}
+                          onClick={() => {
+                            setCurrentProject(project);
+                            setView('editor');
+                          }}
+                        />
+                      );
+                    })}
                   </div>
                 </section>
               )}
@@ -1211,10 +1387,10 @@ export default function App() {
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -20 }}
-              className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-start"
+              className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-start"
             >
               {/* Editor View */}
-              <div className="lg:col-span-8 space-y-8">
+              <div className="lg:col-span-8 space-y-6 sm:space-y-8">
                 <div className="flex items-center justify-between">
                   <button 
                     onClick={() => setView('home')}
@@ -1242,63 +1418,22 @@ export default function App() {
                 <div className="relative">
                   {isProcessing ? (
                     <ProcessingOverlay />
-                  ) : isGeneratingVideo ? (
-                    <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/90 backdrop-blur-2xl rounded-3xl overflow-hidden border border-white/10">
-                      <div className="relative mb-12">
-                        <div className="w-28 h-28 rounded-[2rem] bg-white flex items-center justify-center shadow-[0_0_80px_rgba(255,255,255,0.2)]">
-                          <Video className="w-14 h-14 text-black animate-pulse" />
-                        </div>
-                        <motion.div 
-                          animate={{ rotate: 360 }}
-                          transition={{ duration: 8, repeat: Infinity, ease: "linear" }}
-                          className="absolute -inset-6 border border-white/10 rounded-full"
-                        />
-                      </div>
-                      <div className="text-center space-y-4">
-                        <h2 className="text-3xl font-bold text-white tracking-tight">Generating Video</h2>
-                        <p className="text-neutral-400 text-sm font-medium">{videoProgress}</p>
-                      </div>
-                      <div className="mt-12 w-72 h-1.5 bg-neutral-900 rounded-full overflow-hidden border border-white/5">
-                        <motion.div 
-                          initial={{ width: "0%" }}
-                          animate={{ width: "100%" }}
-                          transition={{ duration: 30, ease: "linear" }}
-                          className="h-full bg-white rounded-full shadow-[0_0_15px_rgba(255,255,255,0.5)]"
-                        />
-                      </div>
-                    </div>
                   ) : currentProject ? (
-                    activeTab === 'video' && currentProject.videoUrl ? (
-                      <div className="aspect-[16/9] w-full bg-black rounded-3xl overflow-hidden shadow-2xl border border-neutral-800 relative group">
-                        <video 
-                          src={currentProject.videoUrl} 
-                          controls 
-                          autoPlay 
-                          loop 
-                          className="w-full h-full object-contain"
-                        />
-                        <div className="absolute top-4 right-4 px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-[10px] font-bold uppercase tracking-widest text-white flex items-center gap-2">
-                          <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                          AI Generated Video
-                        </div>
-                      </div>
-                    ) : (
-                      <BeforeAfterSlider 
-                        beforeImage={currentProject.originalImage}
-                        afterImage={
-                          activeTab === 'environment' && currentProject.environments && selectedEnvIndex !== null
-                            ? currentProject.environments[selectedEnvIndex]
-                            : activeTab === 'tryOn' && currentProject.modelVariations && selectedModelVarIndex !== null
-                              ? currentProject.modelVariations[selectedModelVarIndex]
-                              : activeTab === 'tryOn' && currentProject.tryOnImage 
-                                ? currentProject.tryOnImage 
-                                : activeTab === 'noBg' && currentProject.noBgImage 
-                                ? currentProject.noBgImage 
-                                : currentProject.enhancedImage
-                        }
-                        filters={filters}
-                      />
-                    )
+                    <BeforeAfterSlider 
+                      beforeImage={currentProject.originalImage}
+                      afterImage={
+                        activeTab === 'environment' && currentProject.environments && selectedEnvIndex !== null
+                          ? currentProject.environments[selectedEnvIndex]
+                          : activeTab === 'tryOn' && currentProject.modelVariations && selectedModelVarIndex !== null
+                            ? currentProject.modelVariations[selectedModelVarIndex]
+                            : activeTab === 'tryOn' && currentProject.tryOnImage 
+                              ? currentProject.tryOnImage 
+                              : activeTab === 'noBg' && currentProject.noBgImage 
+                              ? currentProject.noBgImage 
+                              : currentProject.enhancedImage
+                      }
+                      filters={filters}
+                    />
                   ) : null}
                   
                   {(isRemovingBg || isTryingOn || isGeneratingEnv) && (
@@ -1306,30 +1441,30 @@ export default function App() {
                       <div className="flex flex-col items-center gap-3">
                         <RefreshCw className="w-8 h-8 text-white animate-spin" />
                         <span className="text-xs font-bold uppercase tracking-widest text-white">
-                          {isRemovingBg ? "Removing Background..." : isTryingOn ? (variationProgress ? `Generating Variation ${variationProgress.current}/${variationProgress.total}...` : "Generating Model Shot...") : "Generating Environment..."}
+                          {retryStatus || (isRemovingBg ? "Removing Background..." : isTryingOn ? (variationProgress ? `Generating Variation ${variationProgress.current}/${variationProgress.total}...` : "Generating Model Shot...") : "Generating Environment...")}
                         </span>
                       </div>
                     </div>
                   )}
                 </div>
 
-                <div className="flex flex-wrap items-center justify-between gap-6 pt-4">
-                  <div className="flex items-center gap-4">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 sm:gap-6 pt-4">
+                  <div className="flex items-center gap-3 sm:gap-4">
                     <button 
                       onClick={downloadImage}
-                      className="flex items-center gap-2 px-8 py-4 rounded-2xl bg-white text-black font-bold hover:scale-[1.02] active:scale-[0.98] transition-all shadow-[0_0_30px_rgba(255,255,255,0.2)]"
+                      className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-6 sm:px-8 py-3 sm:py-4 rounded-xl sm:rounded-2xl bg-white text-black font-bold hover:scale-[1.02] active:scale-[0.98] transition-all shadow-[0_0_30px_rgba(255,255,255,0.2)] text-sm sm:text-base"
                     >
-                      <Download className="w-5 h-5" />
-                      {activeTab === 'video' ? 'Download Video' : 'Download Result'}
+                      <Download className="w-4 h-4 sm:w-5 sm:h-5" />
+                      Download Result
                     </button>
-                    <button className="p-4 rounded-2xl bg-neutral-900 border border-neutral-800 hover:bg-neutral-800 transition-all">
-                      <Share2 className="w-5 h-5" />
+                    <button className="p-3 sm:p-4 rounded-xl sm:rounded-2xl bg-neutral-900 border border-neutral-800 hover:bg-neutral-800 transition-all">
+                      <Share2 className="w-4 h-4 sm:w-5 sm:h-5" />
                     </button>
                   </div>
 
                   <div className="flex items-center gap-2 text-neutral-500">
-                    <Info className="w-4 h-4" />
-                    <span className="text-xs">
+                    <Info className="w-3 h-3 sm:w-4 sm:h-4" />
+                    <span className="text-[10px] sm:text-xs">
                       {activeTab === 'environment' ? "Showing AI Generated Environment" : activeTab === 'tryOn' ? "Showing AI Model Try-On" : activeTab === 'noBg' ? "Showing background-removed version" : "Slider shows comparison between original and AI enhanced version"}
                     </span>
                   </div>
@@ -1339,11 +1474,11 @@ export default function App() {
               {/* Sidebar / Controls */}
               <div className="lg:col-span-4 space-y-8">
                 {/* View Selector Tabs */}
-                <div className="flex p-1 bg-neutral-900 border border-neutral-800 rounded-2xl">
+                <div className="flex p-1 bg-neutral-900 border border-neutral-800 rounded-2xl overflow-x-auto scrollbar-hide">
                   <button 
                     onClick={() => setActiveTab('enhanced')}
                     className={cn(
-                      "flex-1 py-2 text-[10px] uppercase tracking-widest font-bold rounded-xl transition-all",
+                      "flex-1 min-w-[80px] py-2 text-[9px] sm:text-[10px] uppercase tracking-widest font-bold rounded-xl transition-all",
                       activeTab === 'enhanced' ? "bg-neutral-800 text-white" : "text-neutral-500 hover:text-neutral-300"
                     )}
                   >
@@ -1353,7 +1488,7 @@ export default function App() {
                     onClick={() => currentProject?.noBgImage && setActiveTab('noBg')}
                     disabled={!currentProject?.noBgImage}
                     className={cn(
-                      "flex-1 py-2 text-[10px] uppercase tracking-widest font-bold rounded-xl transition-all",
+                      "flex-1 min-w-[80px] py-2 text-[9px] sm:text-[10px] uppercase tracking-widest font-bold rounded-xl transition-all",
                       activeTab === 'noBg' ? "bg-neutral-800 text-white" : "text-neutral-500 hover:text-neutral-300",
                       !currentProject?.noBgImage && "opacity-30 cursor-not-allowed"
                     )}
@@ -1364,7 +1499,7 @@ export default function App() {
                     onClick={() => currentProject?.tryOnImage && setActiveTab('tryOn')}
                     disabled={!currentProject?.tryOnImage}
                     className={cn(
-                      "flex-1 py-2 text-[10px] uppercase tracking-widest font-bold rounded-xl transition-all",
+                      "flex-1 min-w-[80px] py-2 text-[9px] sm:text-[10px] uppercase tracking-widest font-bold rounded-xl transition-all",
                       activeTab === 'tryOn' ? "bg-neutral-800 text-white" : "text-neutral-500 hover:text-neutral-300",
                       !currentProject?.tryOnImage && "opacity-30 cursor-not-allowed"
                     )}
@@ -1375,27 +1510,18 @@ export default function App() {
                     onClick={() => currentProject?.environments?.length && setActiveTab('environment')}
                     disabled={!currentProject?.environments?.length}
                     className={cn(
-                      "flex-1 py-2 text-[10px] uppercase tracking-widest font-bold rounded-xl transition-all",
+                      "flex-1 min-w-[80px] py-2 text-[9px] sm:text-[10px] uppercase tracking-widest font-bold rounded-xl transition-all",
                       activeTab === 'environment' ? "bg-neutral-800 text-white" : "text-neutral-500 hover:text-neutral-300",
                       !currentProject?.environments?.length && "opacity-30 cursor-not-allowed"
                     )}
                   >
                     Scene
                   </button>
-                  <button 
-                    onClick={() => setActiveTab('video')}
-                    className={cn(
-                      "flex-1 py-2 text-[10px] uppercase tracking-widest font-bold rounded-xl transition-all",
-                      activeTab === 'video' ? "bg-neutral-800 text-white" : "text-neutral-500 hover:text-neutral-300"
-                    )}
-                  >
-                    Video
-                  </button>
                 </div>
 
                 {/* AI Environment Generation */}
-                <div className="bg-neutral-900/50 border border-neutral-800 rounded-3xl p-8 space-y-6">
-                  <div className="flex items-center justify-between">
+                <div className="bg-neutral-900/50 border border-neutral-800 rounded-2xl sm:rounded-3xl p-6 sm:p-8 space-y-6">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                     <div className="space-y-1">
                       <h3 className="text-lg font-medium">AI Environments</h3>
                       <p className="text-xs text-neutral-500">Generate a custom scene for your product.</p>
@@ -1403,7 +1529,7 @@ export default function App() {
                     <button 
                       onClick={generateSuggestions}
                       disabled={isGeneratingEnv}
-                      className="px-4 py-2 rounded-xl bg-white/5 border border-white/10 text-[10px] uppercase tracking-widest font-bold hover:bg-white/10 transition-all flex items-center gap-2"
+                      className="w-full sm:w-auto px-4 py-2 rounded-xl bg-white/5 border border-white/10 text-[10px] uppercase tracking-widest font-bold hover:bg-white/10 transition-all flex items-center justify-center gap-2"
                     >
                       <Sparkles className="w-3 h-3" />
                       Auto-Suggest
@@ -1413,19 +1539,30 @@ export default function App() {
                   <div className="space-y-2">
                     <label className="text-[10px] uppercase tracking-widest font-bold text-neutral-500">Aspect Ratio</label>
                     <div className="flex gap-2">
-                      {aspectRatioOptions.map(opt => (
-                        <button
-                          key={opt.id}
-                          onClick={() => setSelectedAspectRatio(opt.id as any)}
-                          className={cn(
-                            "flex-1 py-2 rounded-xl border text-[10px] font-bold transition-all flex items-center justify-center gap-2",
-                            selectedAspectRatio === opt.id ? "bg-white text-black border-white" : "bg-neutral-950 border-neutral-800 text-neutral-400 hover:border-neutral-700"
-                          )}
-                        >
-                          {opt.icon}
-                          {opt.label}
-                        </button>
-                      ))}
+                      {aspectRatioOptions.map(opt => {
+                        const isSelected = selectedAspectRatios.includes(opt.id as any);
+                        return (
+                          <button
+                            key={opt.id}
+                            onClick={() => {
+                              setSelectedAspectRatios(prev => {
+                                if (prev.includes(opt.id as any)) {
+                                  if (prev.length === 1) return prev;
+                                  return prev.filter(a => a !== opt.id);
+                                }
+                                return [...prev, opt.id as any];
+                              });
+                            }}
+                            className={cn(
+                              "flex-1 py-2 rounded-xl border text-[10px] font-bold transition-all flex items-center justify-center gap-2",
+                              isSelected ? "bg-white text-black border-white" : "bg-neutral-950 border-neutral-800 text-neutral-400 hover:border-neutral-700"
+                            )}
+                          >
+                            {opt.icon}
+                            {opt.label}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
 
@@ -1499,7 +1636,7 @@ export default function App() {
                     </div>
 
                     <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
-                      {['All', 'Luxury', 'Minimalist', 'Nature', 'Urban', 'Tech'].map((cat) => (
+                      {['All', 'Luxury', 'Minimalist', 'Nature', 'Urban', 'Tech', 'Events'].map((cat) => (
                         <button
                           key={cat}
                           onClick={() => setSelectedEnvCategory(cat)}
@@ -1869,73 +2006,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* AI Video Generation */}
-                <div className="bg-neutral-900/50 border border-neutral-800 rounded-3xl p-8 space-y-6">
-                  <div className="space-y-1">
-                    <h3 className="text-lg font-medium">AI Video Showcase</h3>
-                    <p className="text-xs text-neutral-500">Convert your product photo into a cinematic commercial.</p>
-                  </div>
-
-                  {currentProject?.videoUrl ? (
-                    <div className="space-y-4">
-                      <div className="aspect-video rounded-2xl bg-black overflow-hidden border border-neutral-800 relative group">
-                        <video src={currentProject.videoUrl} className="w-full h-full object-cover opacity-50" />
-                        <div className="absolute inset-0 flex items-center justify-center">
-                          <button 
-                            onClick={() => setActiveTab('video')}
-                            className="p-4 rounded-full bg-white/10 backdrop-blur-md border border-white/20 hover:bg-white/20 transition-all"
-                          >
-                            <Video className="w-6 h-6 text-white" />
-                          </button>
-                        </div>
-                      </div>
-                      <button 
-                        onClick={generateVideo}
-                        disabled={isGeneratingVideo}
-                        className="w-full py-4 rounded-2xl bg-neutral-800 border border-neutral-700 text-sm font-medium hover:bg-neutral-700 transition-all flex items-center justify-center gap-2"
-                      >
-                        <RefreshCw className={cn("w-4 h-4", isGeneratingVideo && "animate-spin")} />
-                        Regenerate Video
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="space-y-6">
-                      <div className="p-4 rounded-2xl bg-white/5 border border-white/10 space-y-3">
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center">
-                            <Video className="w-5 h-5 text-white" />
-                          </div>
-                          <div>
-                            <p className="text-sm font-medium">Cinematic Reveal</p>
-                            <p className="text-[10px] text-neutral-500 uppercase tracking-widest font-bold">Veo 3.1 Lite Engine</p>
-                          </div>
-                        </div>
-                        <p className="text-xs text-neutral-400 leading-relaxed">
-                          Our AI will analyze your product and create a 5-second cinematic video with professional camera movements and studio lighting.
-                        </p>
-                      </div>
-
-                      <button 
-                        onClick={generateVideo}
-                        disabled={isGeneratingVideo}
-                        className="w-full py-4 rounded-2xl bg-white text-black font-bold hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(255,255,255,0.1)]"
-                      >
-                        {isGeneratingVideo ? (
-                          <>
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                            {videoProgress || "Generating..."}
-                          </>
-                        ) : (
-                          <>
-                            <Sparkles className="w-4 h-4" />
-                            Generate Cinematic Video
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  )}
-                </div>
-
                 <div className="bg-neutral-900/50 border border-neutral-800 rounded-3xl p-8 space-y-8">
                   <div className="space-y-2">
                     <h3 className="text-lg font-medium">Enhancement Details</h3>
@@ -1990,19 +2060,19 @@ export default function App() {
       </main>
 
       {/* Footer */}
-      <footer className="border-t border-neutral-900 py-12 px-6">
-        <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-8">
+      <footer className="border-t border-neutral-900 py-8 sm:py-12 px-4 sm:px-6">
+        <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6 sm:gap-8">
           <div className="flex items-center gap-3 opacity-50">
             <Sparkles className="w-5 h-5" />
             <span className="text-sm font-bold tracking-tighter uppercase">StudioFlyr</span>
           </div>
-          <p className="text-neutral-600 text-xs">
+          <p className="text-neutral-600 text-[10px] sm:text-xs text-center md:text-left">
             © 2026 StudioFlyr AI. All rights reserved. Professional product photography made accessible.
           </p>
-          <div className="flex items-center gap-6">
-            <a href="#" className="text-xs text-neutral-600 hover:text-white transition-colors">Privacy</a>
-            <a href="#" className="text-xs text-neutral-600 hover:text-white transition-colors">Terms</a>
-            <a href="#" className="text-xs text-neutral-600 hover:text-white transition-colors">Contact</a>
+          <div className="flex items-center gap-4 sm:gap-6">
+            <a href="#" className="text-[10px] sm:text-xs text-neutral-600 hover:text-white transition-colors">Privacy</a>
+            <a href="#" className="text-[10px] sm:text-xs text-neutral-600 hover:text-white transition-colors">Terms</a>
+            <a href="#" className="text-[10px] sm:text-xs text-neutral-600 hover:text-white transition-colors">Contact</a>
           </div>
         </div>
       </footer>

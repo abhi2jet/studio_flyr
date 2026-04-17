@@ -4,7 +4,7 @@ import { Upload, Image as ImageIcon, Sparkles } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
 
 interface UploadZoneProps {
-  onUpload: (file: File) => void;
+  onUpload: (files: File[]) => void;
   isProcessing?: boolean;
 }
 
@@ -12,13 +12,13 @@ export default function UploadZone({ onUpload, isProcessing }: UploadZoneProps) 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop: (acceptedFiles) => {
       if (acceptedFiles.length > 0) {
-        onUpload(acceptedFiles[0]);
+        onUpload(acceptedFiles);
       }
     },
     accept: {
       'image/*': ['.jpeg', '.jpg', '.png', '.webp']
     },
-    multiple: false,
+    multiple: true,
     disabled: isProcessing
   } as any);
 
@@ -26,7 +26,7 @@ export default function UploadZone({ onUpload, isProcessing }: UploadZoneProps) 
     <div
       {...getRootProps()}
       className={cn(
-        "relative w-full max-w-2xl aspect-[4/3] rounded-3xl border-2 border-dashed transition-all duration-300 flex flex-col items-center justify-center gap-6 cursor-pointer group overflow-hidden",
+        "relative w-full max-w-2xl aspect-square sm:aspect-[4/3] rounded-3xl border-2 border-dashed transition-all duration-300 flex flex-col items-center justify-center gap-6 cursor-pointer group overflow-hidden",
         isDragActive 
           ? "border-white bg-white/5" 
           : "border-neutral-800 hover:border-neutral-600 bg-neutral-900/50",

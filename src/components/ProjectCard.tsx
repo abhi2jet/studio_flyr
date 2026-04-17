@@ -1,10 +1,14 @@
 import { motion } from 'motion/react';
 import { ExternalLink, Trash2 } from 'lucide-react';
+import { cn } from '../lib/utils';
 
 interface ProjectCardProps {
   id: string;
   originalImage: string;
   enhancedImage: string;
+  templateId?: string;
+  templateName?: string;
+  aspectRatio?: string;
   timestamp: number;
   onDelete: (id: string) => void;
   onClick: () => void;
@@ -14,6 +18,8 @@ export default function ProjectCard({
   id, 
   originalImage, 
   enhancedImage, 
+  templateName,
+  aspectRatio,
   timestamp, 
   onDelete,
   onClick 
@@ -34,7 +40,10 @@ export default function ProjectCard({
       className="group relative bg-neutral-900 rounded-2xl overflow-hidden border border-neutral-800 hover:border-neutral-700 transition-all duration-300"
     >
       <div 
-        className="aspect-square overflow-hidden cursor-pointer"
+        className={cn(
+          "overflow-hidden cursor-pointer",
+          aspectRatio === '16:9' ? "aspect-video" : aspectRatio === '9:16' ? "aspect-[9/16]" : "aspect-square"
+        )}
         onClick={onClick}
       >
         <img 
@@ -56,10 +65,16 @@ export default function ProjectCard({
       <div className="p-4 flex items-center justify-between">
         <div className="space-y-1">
           <h4 className="text-sm font-medium text-white truncate max-w-[120px]">
-            Project {id.slice(0, 4)}
+            {templateName || `Project ${id.slice(0, 4)}`}
           </h4>
           <p className="text-[10px] text-neutral-500 uppercase tracking-wider">
             {date}
+          </p>
+        </div>
+        
+        <div className="space-y-1 text-right">
+          <p className="text-[10px] text-neutral-500 uppercase tracking-widest font-bold">
+            {aspectRatio || '1:1'}
           </p>
         </div>
         
