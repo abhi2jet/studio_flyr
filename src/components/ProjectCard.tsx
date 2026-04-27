@@ -10,6 +10,7 @@ interface ProjectCardProps {
   templateName?: string;
   aspectRatio?: string;
   timestamp: number;
+  category?: string;
   onDelete: (id: string) => void;
   onClick: () => void;
 }
@@ -20,7 +21,8 @@ export default function ProjectCard({
   enhancedImage, 
   templateName,
   aspectRatio,
-  timestamp, 
+  timestamp,
+  category,
   onDelete,
   onClick 
 }: ProjectCardProps) {
@@ -37,7 +39,7 @@ export default function ProjectCard({
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.95 }}
-      className="group relative bg-neutral-900 rounded-2xl overflow-hidden border border-neutral-800 hover:border-neutral-700 transition-all duration-300"
+      className="group relative bg-slate-900/50 backdrop-blur-sm rounded-2xl overflow-hidden border border-slate-800 hover:border-slate-700 hover:shadow-[0_0_30px_rgba(255,255,255,0.03)] transition-all duration-500"
     >
       <div 
         className={cn(
@@ -52,28 +54,25 @@ export default function ProjectCard({
           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700"
           referrerPolicy="no-referrer"
         />
-        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] text-white/70 uppercase tracking-widest font-medium">
-              View Project
-            </span>
-            <ExternalLink className="w-4 h-4 text-white" />
-          </div>
+        <div className="absolute inset-x-0 bottom-0 p-3 flex items-center justify-between bg-gradient-to-t from-slate-950/90 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+             <span className="text-[10px] text-white/90 font-medium bg-slate-950/50 px-2.5 py-1 rounded-full backdrop-blur-md border border-white/10">
+                {category || 'Uncategorized'}
+             </span>
         </div>
       </div>
 
       <div className="p-4 flex items-center justify-between">
-        <div className="space-y-1">
-          <h4 className="text-sm font-medium text-white truncate max-w-[120px]">
+        <div className="space-y-0.5">
+          <h4 className="text-sm font-semibold text-slate-100 truncate max-w-[120px]">
             {templateName || `Project ${id.slice(0, 4)}`}
           </h4>
-          <p className="text-[10px] text-neutral-500 uppercase tracking-wider">
+          <p className="text-[10px] text-slate-500 uppercase tracking-wider font-medium">
             {date}
           </p>
         </div>
         
         <div className="space-y-1 text-right">
-          <p className="text-[10px] text-neutral-500 uppercase tracking-widest font-bold">
+          <p className="text-[10px] text-slate-500 font-bold">
             {aspectRatio || '1:1'}
           </p>
         </div>
@@ -83,7 +82,7 @@ export default function ProjectCard({
             e.stopPropagation();
             onDelete(id);
           }}
-          className="p-2 rounded-full hover:bg-red-500/10 text-neutral-600 hover:text-red-500 transition-colors"
+          className="p-2 rounded-xl hover:bg-red-500/10 text-slate-600 hover:text-red-400 transition-colors"
         >
           <Trash2 className="w-4 h-4" />
         </button>

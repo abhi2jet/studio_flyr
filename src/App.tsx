@@ -27,15 +27,27 @@ import {
   SlidersHorizontal,
   RotateCcw,
   Trash2,
-  X
+  X,
+  Settings2,
+  Check,
+  Layers
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence } from 'framer-motion';
 import UploadZone from './components/UploadZone';
 import BeforeAfterSlider from './components/BeforeAfterSlider';
 import ProcessingOverlay from './components/ProcessingOverlay';
 import ProjectCard from './components/ProjectCard';
-import { cn } from './lib/utils';
+import { ApiStatusBadge } from './components/ApiStatusBadge';
+import { cn, base64ToFile } from './lib/utils';
 import { saveProjects, loadProjects } from './lib/storage';
+import { testGeminiConnection, generateVideo } from './services/geminiService';
+import { applyWatermark, WatermarkOptions } from './lib/imageUtils';
+import AccountManager from './components/AccountManager';
+import PricingSection from './components/PricingSection';
+import ShowcaseSection from './components/ShowcaseSection';
+import EnvironmentGallery from './components/EnvironmentGallery';
+import CameraModal from './components/CameraModal';
+import { testConnection } from './lib/firebase';
 
 interface Project {
   id: string;
@@ -49,6 +61,7 @@ interface Project {
   templateName?: string;
   aspectRatio?: string;
   timestamp: number;
+  category?: string;
 }
 
 interface Template {
@@ -76,26 +89,39 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isRemovingBg, setIsRemovingBg] = useState(false);
   const [isTryingOn, setIsTryingOn] = useState(false);
+  const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
   const [variationProgress, setVariationProgress] = useState<{current: number, total: number} | null>(null);
   const [isGeneratingEnv, setIsGeneratingEnv] = useState(false);
+  const [imagePrompt, setImagePrompt] = useState('');
+  const [generatedImage, setGeneratedImage] = useState<string | null>(null);
+  const [isGeneratingImage, setIsGeneratingImage] = useState(false);
+  const [showInteriorCamera, setShowInteriorCamera] = useState(false);
   const [retryStatus, setRetryStatus] = useState<string | null>(null);
   const [selectedModelVarIndex, setSelectedModelVarIndex] = useState<number | null>(null);
-  const [view, setView] = useState<'home' | 'editor'>('home');
+  const [view, setView] = useState<'home' | 'editor' | 'pricing' | 'showcase'>('home');
   const [bgColor, setBgColor] = useState<string>('transparent');
   const [activeTab, setActiveTab] = useState<'enhanced' | 'noBg' | 'tryOn' | 'environment'>('enhanced');
   const [selectedTemplateIds, setSelectedTemplateIds] = useState<string[]>(['general']);
   const [isBatchProcessing, setIsBatchProcessing] = useState(false);
+  const [batchSettings, setBatchSettings] = useState({
+    removeBg: false,
+    autoEnv: false,
+    autoTryOn: false
+  });
+
   const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
   const [batchComplete, setBatchComplete] = useState(false);
   const [envPrompt, setEnvPrompt] = useState('');
   const [selectedEnvIndex, setSelectedEnvIndex] = useState<number | null>(null);
   const [selectedEnvCategory, setSelectedEnvCategory] = useState<string>('All');
+  const [projectCategory, setProjectCategory] = useState<string>('All');
   const [apiStatus, setApiStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle');
   const [apiErrorMessage, setApiErrorMessage] = useState<string | null>(null);
 
   // Test API connection on mount and when key might have changed
   useEffect(() => {
-    const testConnection = async () => {
+    testConnection();
+    const testConnectionAI = async () => {
       setApiStatus('testing');
       try {
         const ai = getAI();
@@ -121,7 +147,7 @@ export default function App() {
       }
     };
 
-    testConnection();
+    testConnectionAI();
   }, []);
   const [error, setError] = useState<{ message: string; suggestion?: string; onRetry?: () => void; isQuota?: boolean } | null>(null);
   const [cooldown, setCooldown] = useState<number>(0);
@@ -163,6 +189,22 @@ export default function App() {
     saturate: 100,
     sharpen: 0
   });
+
+  const [watermarkOptions, setWatermarkOptions] = useState<WatermarkOptions>({
+    text: 'PALLAVI JEWELLERS',
+    placement: 'center',
+    opacity: 30,
+    size: 8,
+    disabled: false,
+    fontWeight: 'bold',
+    fontStyle: 'normal',
+    fontFamily: 'Arial'
+  });
+
+  useEffect(() => {
+    (window as any).__watermarkOptions = watermarkOptions;
+  }, [watermarkOptions]);
+
 
   const [selectedAspectRatios, setSelectedAspectRatios] = useState<('1:1' | '16:9' | '9:16')[]>(['1:1']);
 
@@ -275,6 +317,20 @@ export default function App() {
       categoryPresets: [
         { name: 'Pure White', prompt: 'a seamless pure white studio background with soft natural shadows and high-key lighting' },
         { name: 'Technical Grey', prompt: 'a professional technical grey studio background with precise softbox gradients' }
+      ]
+    },
+    { 
+      id: 'jewelry-set', 
+      name: 'Jewelry Set', 
+      description: 'Optimized for sets or multiple jewelry pieces.',
+      icon: <Layers className="w-4 h-4" />,
+      prompt: 'Enhance this photo of multiple jewelry items or a jewelry set. Use professional studio lighting to ensure every piece is perfectly clear, sparkling, and luxurious. Focus on macro details for every item in the set. Maintain consistent metallic shine and gemstone clarity across all pieces. Make it look like a high-end luxury brand catalog shot.',
+      suggestedBgs: ['transparent', 'black', 'white', 'grey'],
+      envSuggestions: ['luxury display case', 'presentation box', 'multi-tier jewelry stand'],
+      categoryPresets: [
+        { name: 'Display Case', prompt: 'a high-end jewelry display case with plush navy velvet lining and elegant spotlighting' },
+        { name: 'Studio Stand', prompt: 'a professional multi-tier jewelry stand on a clean white reflective surface' },
+        { name: 'Gift Box', prompt: 'an open luxury jewelry gift box with soft satin lining and warm boutique lighting' }
       ]
     },
     { 
@@ -456,7 +512,11 @@ export default function App() {
   const handleAIError = (error: any, context: string, onRetry?: () => void) => {
     console.error(`${context} failed:`, error);
     
-    const errorStr = typeof error === 'string' ? error : JSON.stringify(error);
+    // Improved stringification for Error objects
+    const errorStr = typeof error === 'string' 
+      ? error 
+      : (error instanceof Error ? `${error.message} ${JSON.stringify(error)}` : JSON.stringify(error));
+
     let message = error?.message || (typeof error === 'string' ? error : `${context} failed. Please try again.`);
     
     if (message.includes('{"error":')) {
@@ -568,7 +628,22 @@ export default function App() {
     // Process tasks
     await Promise.all(tasks.map(async (task) => {
       try {
-        await enhanceImage(task.file, false, true, task.templateId, task.aspectRatio);
+        let project = await enhanceImage(task.file, false, true, task.templateId, task.aspectRatio);
+        
+        if (project && batchSettings.removeBg) {
+          project = await removeBackground('transparent', project, true);
+        }
+        
+        if (project && batchSettings.autoEnv) {
+          const template = templates.find(t => t.id === project!.templateId) || templates[0];
+          const prompt = template.envSuggestions[0];
+          project = await generateEnvironment(prompt, project, true);
+        }
+        
+        if (project && project.enhancedImage && batchSettings.autoTryOn && (project.templateId?.includes('jewelry') || project.templateId === 'studio-softbox')) {
+          const result = await tryOnModel(project, true);
+          if (result) project = result;
+        }
       } catch (err) {
         console.error(`Batch processing failed for a task:`, err);
       } finally {
@@ -583,7 +658,7 @@ export default function App() {
     setTimeout(() => setBatchComplete(false), 5000);
   };
 
-  const enhanceImage = async (input: File | string, useFallback = false, isBatch = false, overrideTemplateId?: string, overrideAspectRatio?: '1:1' | '16:9' | '9:16') => {
+  const enhanceImage = async (input: File | string, useFallback = false, isBatch = false, overrideTemplateId?: string, overrideAspectRatio?: '1:1' | '16:9' | '9:16'): Promise<Project | null> => {
     if (!isBatch) {
       setIsProcessing(true);
       setView('editor');
@@ -612,7 +687,8 @@ export default function App() {
       const base64Content = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
 
       // Validation check for multiple jewelry items
-      if (templateId !== 'studio-softbox') {
+      const multiItemAllowedIds = ['studio-softbox', 'jewelry-set'];
+      if (!multiItemAllowedIds.includes(templateId)) {
         try {
           const validationResponse = await callAIWithRetry(() => ai.models.generateContent({
             model: 'gemini-2.0-flash',
@@ -638,7 +714,11 @@ export default function App() {
           const validationText = validationResponse.candidates?.[0]?.content?.parts?.[0]?.text;
           const result = validationText?.trim().toUpperCase();
           if (result === 'YES') {
-            throw new Error(`Multiple jewelry items detected in an image. Please use 'Studio Softbox' for multiple items. (Template: ${template.name})`);
+            if (templateId !== 'jewelry-set') {
+              console.warn("Multiple jewelry items detected, automatically switching to 'Jewelry Set' template.");
+              return enhanceImage(input, useFallback, isBatch, 'jewelry-set', aspectRatio);
+            }
+            throw new Error(`Multiple jewelry items detected in an image. Please use 'Jewelry Set' or 'Studio Softbox' for multiple items. (Template: ${template.name})`);
           }
         } catch (vErr: any) {
           if (vErr.message?.includes("Multiple jewelry items detected")) {
@@ -648,7 +728,6 @@ export default function App() {
         }
       }
 
-      // Call Gemini to "enhance" the image
       // Fallback to 2.5 if 3.1 fails with permission error
       const modelName = useFallback ? 'gemini-2.5-flash-image' : 'gemini-3.1-flash-image-preview';
       
@@ -679,7 +758,8 @@ export default function App() {
       if (response.candidates?.[0]?.content?.parts) {
         for (const part of response.candidates[0].content.parts) {
           if (part.inlineData) {
-            enhancedImageBase64 = `data:image/png;base64,${part.inlineData.data}`;
+            const rawBase64 = `data:image/png;base64,${part.inlineData.data}`;
+            enhancedImageBase64 = await applyWatermark(rawBase64);
             break;
           }
         }
@@ -697,20 +777,28 @@ export default function App() {
         templateId: templateId,
         templateName: template.name,
         aspectRatio: aspectRatio,
+        category: 'Uncategorized',
         timestamp: Date.now(),
       };
 
       setProjects(prev => [newProject, ...prev]);
-      setCurrentProject(newProject);
+      if (!isBatch) setCurrentProject(newProject);
+      return newProject;
     } catch (error: any) {
       const errorStr = JSON.stringify(error).toLowerCase();
-      if (!useFallback && (errorStr.includes("403") || errorStr.includes("permission_denied"))) {
-        console.warn("Pro model permission denied, falling back to Standard model...");
-        enhanceImage(input, true, isBatch);
-        return;
+      // Handle permission denied/403/quota issues with fallback model
+      if (!useFallback && (errorStr.includes("403") || errorStr.includes("permission_denied") || errorStr.includes("resource_exhausted"))) {
+        console.warn("Model unavailable or quota reached, falling back to Standard model...");
+        return enhanceImage(input, true, isBatch, overrideTemplateId, overrideAspectRatio);
       }
-      handleAIError(error, "Enhancement", () => enhanceImage(input, false, isBatch));
-      if (!isBatch) setView('home');
+      
+      if (!isBatch) {
+        handleAIError(error, "Enhancement", () => enhanceImage(input, false, isBatch, overrideTemplateId, overrideAspectRatio));
+        setView('home');
+      } else {
+        throw error;
+      }
+      return null;
     } finally {
       if (!isBatch) {
         setIsProcessing(false);
@@ -718,14 +806,18 @@ export default function App() {
     }
   };
 
-  const removeBackground = async (color: string) => {
-    if (!currentProject) return;
-    setIsRemovingBg(true);
-    setBgColor(color);
+  const removeBackground = async (color: string, projectOverride?: Project, isBatch = false): Promise<Project | null> => {
+    const project = projectOverride || currentProject;
+    if (!project) return null;
+    
+    if (!isBatch) {
+      setIsRemovingBg(true);
+      setBgColor(color);
+    }
 
     try {
       const ai = getAI();
-      const base64Data = currentProject.enhancedImage;
+      const base64Data = project.enhancedImage;
       const base64Content = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
       const mimeType = base64Data.includes(';') ? base64Data.split(';')[0].split(':')[1] : 'image/png';
 
@@ -734,7 +826,7 @@ export default function App() {
         : `Remove the background of this product image and replace it with a solid ${color} background. Return the isolated product on the new background.`;
 
       const response = await callAIWithRetry(() => ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
+        model: 'gemini-3.1-flash-image-preview',
         contents: {
           parts: [
             {
@@ -748,38 +840,58 @@ export default function App() {
             },
           ],
         },
+        config: {
+          imageConfig: {
+            imageSize: "1K",
+            aspectRatio: "1:1"
+          }
+        }
       }), "Background removal", 10);
 
       let processedImage = '';
       if (response.candidates?.[0]?.content?.parts) {
         for (const part of response.candidates[0].content.parts) {
           if (part.inlineData) {
-            processedImage = `data:image/png;base64,${part.inlineData.data}`;
+            const rawBase64 = `data:image/png;base64,${part.inlineData.data}`;
+            processedImage = await applyWatermark(rawBase64);
             break;
           }
         }
       }
 
       if (processedImage) {
-        const updatedProject = { ...currentProject, noBgImage: processedImage };
-        setCurrentProject(updatedProject);
-        setProjects(prev => prev.map(p => p.id === currentProject.id ? updatedProject : p));
-        setActiveTab('noBg');
+        const updatedProject = { ...project, noBgImage: processedImage };
+        setProjects(prev => prev.map(p => p.id === project.id ? updatedProject : p));
+        if (currentProject?.id === project.id) setCurrentProject(updatedProject);
+        if (!isBatch) setActiveTab('noBg');
+        return updatedProject;
       }
+      return null;
     } catch (error) {
-      handleAIError(error, "Background removal", () => removeBackground(color));
+      if (!isBatch) {
+        handleAIError(error, "Background removal", () => removeBackground(color));
+      } else {
+        throw error;
+      }
+      return null;
     } finally {
-      setIsRemovingBg(false);
+      if (!isBatch) setIsRemovingBg(false);
     }
   };
 
-  const tryOnModel = async () => {
-    if (!currentProject) return;
-    setIsTryingOn(true);
+  const tryOnModel = async (projectOverride?: Project, isBatch = false): Promise<Project | null> => {
+    const project = projectOverride || currentProject;
+    if (!project) return null;
+    
+    if (!isBatch) setIsTryingOn(true);
 
     try {
       const ai = getAI();
-      const base64Data = currentProject.enhancedImage;
+      const base64Data = project.enhancedImage;
+      if (!base64Data) {
+        console.warn("Project missing enhanced image, skipping try-on.");
+        return null;
+      }
       const base64Content = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
       const mimeType = base64Data.includes(';') ? base64Data.split(';')[0].split(':')[1] : 'image/png';
 
@@ -787,7 +899,7 @@ export default function App() {
       const prompt = `Generate a professional, high-end fashion photography shot of ${modelDesc} wearing this specific piece of jewelry. The jewelry should be clearly visible and look identical to the original. The model should be in a studio setting with professional lighting that matches the ${modelVibe} vibe. The focus should be on how the jewelry looks on a person.`;
 
       const response = await callAIWithRetry(() => ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
+        model: 'gemini-3.1-flash-image-preview',
         contents: {
           parts: [
             {
@@ -801,28 +913,57 @@ export default function App() {
             },
           ],
         },
+        config: {
+          imageConfig: {
+            imageSize: "1K",
+            aspectRatio: "1:1"
+          }
+        }
       }), "Model try-on", 10);
 
       let processedImage = '';
       if (response.candidates?.[0]?.content?.parts) {
         for (const part of response.candidates[0].content.parts) {
           if (part.inlineData) {
-            processedImage = `data:image/png;base64,${part.inlineData.data}`;
+            const rawBase64 = `data:image/png;base64,${part.inlineData.data}`;
+            processedImage = await applyWatermark(rawBase64);
             break;
           }
         }
       }
 
       if (processedImage) {
-        const updatedProject = { ...currentProject, tryOnImage: processedImage };
-        setCurrentProject(updatedProject);
-        setProjects(prev => prev.map(p => p.id === currentProject.id ? updatedProject : p));
-        setActiveTab('tryOn');
+        const updatedProject = { ...project, tryOnImage: processedImage };
+        setProjects(prev => prev.map(p => p.id === project.id ? updatedProject : p));
+        if (currentProject?.id === project.id) {
+          setCurrentProject(updatedProject);
+          if (!isBatch) setActiveTab('tryOn');
+        }
+        return updatedProject;
       }
+      return null;
     } catch (error) {
-      handleAIError(error, "Model try-on", () => tryOnModel());
+      if (!isBatch) {
+        handleAIError(error, "Model try-on");
+      } else {
+        throw error;
+      }
+      return null;
     } finally {
-      setIsTryingOn(false);
+      if (!isBatch) setIsTryingOn(false);
+    }
+  };
+
+  const generateVideoHandler = async () => {
+    if (!currentProject) return;
+    setIsGeneratingVideo(true);
+    try {
+        const videoUrl = await generateVideo(`Generate a video based on the style of the current project: ${currentProject.templateId}`);
+        console.log("Video generated:", videoUrl);
+    } catch (err) {
+        handleAIError(err, "Video generation", () => generateVideoHandler());
+    } finally {
+        setIsGeneratingVideo(false);
     }
   };
 
@@ -854,19 +995,26 @@ export default function App() {
           const prompt = `Generate a professional, high-end fashion photography shot of ${promptText} wearing this specific piece of jewelry. The jewelry should be clearly visible and look identical to the original. The model should be in a studio setting with professional lighting. The focus should be on how the jewelry looks on a person.`;
 
           const res = await callAIWithRetry(() => ai.models.generateContent({
-            model: 'gemini-2.5-flash-image',
+            model: 'gemini-3.1-flash-image-preview',
             contents: {
               parts: [
                 { inlineData: { data: base64Content, mimeType } },
                 { text: prompt }
               ]
+            },
+            config: {
+              imageConfig: {
+                imageSize: "1K",
+                aspectRatio: "1:1"
+              }
             }
           }), `Variation ${i + 1}`, 10);
 
           if (res.candidates?.[0]?.content?.parts) {
             for (const part of res.candidates[0].content.parts) {
               if (part.inlineData) {
-                newVariations.push(`data:image/png;base64,${part.inlineData.data}`);
+                const rawBase64 = `data:image/png;base64,${part.inlineData.data}`;
+                newVariations.push(await applyWatermark(rawBase64));
                 break;
               }
             }
@@ -899,19 +1047,45 @@ export default function App() {
     }
   };
 
-  const generateEnvironment = async (customPrompt?: string) => {
-    if (!currentProject) return;
-    setIsGeneratingEnv(true);
+  const generateImageArt = async () => {
+    if (!imagePrompt.trim()) return;
+    setIsGeneratingImage(true);
+    try {
+      const ai = getAI();
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.1-flash-image-preview',
+        contents: { parts: [{ text: imagePrompt }] },
+      });
+      // @ts-ignore
+      for (const part of response.candidates[0].content.parts) {
+        if (part.inlineData) {
+          setGeneratedImage(`data:image/png;base64,${part.inlineData.data}`);
+          break;
+        }
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Failed to generate image');
+    } finally {
+      setIsGeneratingImage(false);
+    }
+  };
+
+  const generateEnvironment = async (customPrompt?: string, projectOverride?: Project, isBatch = false): Promise<Project | null> => {
+    const project = projectOverride || currentProject;
+    if (!project) return null;
+    
+    if (!isBatch) setIsGeneratingEnv(true);
     const promptToUse = customPrompt || envPrompt || "a professional, minimalist studio setting with soft shadows and elegant lighting";
 
     try {
       const ai = getAI();
-      const base64Data = currentProject.enhancedImage;
+      const base64Data = project.enhancedImage;
       const base64Content = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
       const mimeType = base64Data.includes(';') ? base64Data.split(';')[0].split(':')[1] : 'image/png';
 
       const response = await callAIWithRetry(() => ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
+        model: 'gemini-3.1-flash-image-preview',
         contents: {
           parts: [
             {
@@ -927,7 +1101,7 @@ export default function App() {
         },
         config: {
           imageConfig: {
-            aspectRatio: selectedAspectRatios[0]
+            aspectRatio: project.aspectRatio || selectedAspectRatios[0]
           }
         } as any
       }), "Environment generation", 10);
@@ -936,25 +1110,37 @@ export default function App() {
       if (response.candidates?.[0]?.content?.parts) {
         for (const part of response.candidates[0].content.parts) {
           if (part.inlineData) {
-            processedImage = `data:image/png;base64,${part.inlineData.data}`;
+            const rawBase64 = `data:image/png;base64,${part.inlineData.data}`;
+            processedImage = await applyWatermark(rawBase64);
             break;
           }
         }
       }
 
       if (processedImage) {
-        const newEnvs = [processedImage, ...(currentProject.environments || [])];
-        const updatedProject = { ...currentProject, environments: newEnvs };
-        setCurrentProject(updatedProject);
-        setProjects(prev => prev.map(p => p.id === currentProject.id ? updatedProject : p));
-        setSelectedEnvIndex(0);
-        setActiveTab('environment');
-        setEnvPrompt('');
+        const newEnvs = [processedImage, ...(project.environments || [])];
+        const updatedProject = { ...project, environments: newEnvs };
+        setProjects(prev => prev.map(p => p.id === project.id ? updatedProject : p));
+        if (currentProject?.id === project.id) {
+          setCurrentProject(updatedProject);
+          setSelectedEnvIndex(0);
+          if (!isBatch) {
+            setActiveTab('environment');
+            setEnvPrompt('');
+          }
+        }
+        return updatedProject;
       }
+      return null;
     } catch (error) {
-      handleAIError(error, "Environment generation", () => generateEnvironment(customPrompt));
+      if (!isBatch) {
+        handleAIError(error, "Environment generation", () => generateEnvironment(customPrompt));
+      } else {
+        throw error;
+      }
+      return null;
     } finally {
-      setIsGeneratingEnv(false);
+      if (!isBatch) setIsGeneratingEnv(false);
     }
   };
 
@@ -975,7 +1161,7 @@ export default function App() {
       for (const prompt of suggestions) {
         try {
           const res = await callAIWithRetry(() => ai.models.generateContent({
-            model: 'gemini-2.5-flash-image',
+            model: 'gemini-3.1-flash-image-preview',
             contents: {
               parts: [
                 { inlineData: { data: base64Content, mimeType } },
@@ -992,7 +1178,8 @@ export default function App() {
           if (res.candidates?.[0]?.content?.parts) {
             for (const part of res.candidates[0].content.parts) {
               if (part.inlineData) {
-                newImages.push(`data:image/png;base64,${part.inlineData.data}`);
+                const rawBase64 = `data:image/png;base64,${part.inlineData.data}`;
+                newImages.push(await applyWatermark(rawBase64));
                 break;
               }
             }
@@ -1154,22 +1341,13 @@ export default function App() {
               <Sparkles className="w-5 h-5 sm:w-6 sm:h-6 text-black" />
             </div>
             <span className="text-lg sm:text-xl font-bold tracking-tighter uppercase">StudioFlyr</span>
-            {apiStatus === 'error' && (
-              <div className="hidden sm:flex items-center gap-2 px-3 py-1 rounded-full bg-red-500/10 border border-red-500/20 text-[10px] font-bold text-red-500 uppercase tracking-widest animate-pulse">
-                <AlertCircle className="w-3 h-3" />
-                API Error
-              </div>
-            )}
-            {apiStatus === 'testing' && (
-              <div className="hidden sm:flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-[10px] font-bold text-blue-500 uppercase tracking-widest">
-                <RefreshCw className="w-3 h-3 animate-spin" />
-                Connecting...
-              </div>
-            )}
+            <ApiStatusBadge status={apiStatus} />
           </div>
 
           <nav className="hidden md:flex items-center gap-8">
-            <button 
+            <motion.button 
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
               onClick={() => setView('home')}
               className={cn(
                 "text-sm font-medium transition-colors",
@@ -1177,16 +1355,33 @@ export default function App() {
               )}
             >
               Feed
-            </button>
-            <button className="text-sm font-medium text-neutral-500 hover:text-white transition-colors">
+            </motion.button>
+            <motion.button 
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => setView('showcase')}
+              className={cn(
+                "text-sm font-medium transition-colors",
+                view === 'showcase' ? "text-white" : "text-neutral-500 hover:text-white"
+              )}
+            >
               Showcase
-            </button>
-            <button className="text-sm font-medium text-neutral-500 hover:text-white transition-colors">
+            </motion.button>
+            <motion.button 
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => setView('pricing')}
+              className={cn(
+                "text-sm font-medium transition-colors",
+                view === 'pricing' ? "text-white" : "text-neutral-500 hover:text-white"
+              )}
+            >
               Pricing
-            </button>
+            </motion.button>
           </nav>
 
           <div className="flex items-center gap-2 sm:gap-4">
+            <AccountManager />
             {view === 'editor' && (
               <button 
                 onClick={() => setView('home')}
@@ -1211,7 +1406,29 @@ export default function App() {
 
       <main className="pt-24 sm:pt-32 pb-12 sm:pb-20 px-4 sm:px-6 max-w-7xl mx-auto">
         <AnimatePresence mode="wait">
-          {view === 'home' ? (
+          {view === 'pricing' && (
+            <motion.div
+              key="pricing"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              transition={{ duration: 0.2, ease: "easeInOut" }}
+            >
+              <PricingSection />
+            </motion.div>
+          )}
+          {view === 'showcase' && (
+            <motion.div
+              key="showcase"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              transition={{ duration: 0.2, ease: "easeInOut" }}
+            >
+              <ShowcaseSection />
+            </motion.div>
+          )}
+          {view === 'home' && (
             <motion.div 
               key="home"
               initial={{ opacity: 0, y: 20 }}
@@ -1296,6 +1513,78 @@ export default function App() {
                   })}
                 </div>
 
+                {/* Batch Settings */}
+                <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-8 py-5 px-8 bg-white/[0.02] border border-white/5 rounded-3xl w-full max-w-4xl backdrop-blur-md">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 rounded-lg bg-white/5">
+                      <Settings2 className="w-4 h-4 text-white/50" />
+                    </div>
+                    <div className="flex flex-col">
+                      <span className="text-[9px] uppercase tracking-[0.2em] font-bold text-white/30 leading-none">Automation</span>
+                      <span className="text-xs font-bold text-white/80">Jewelry Batch Flow</span>
+                    </div>
+                  </div>
+                  
+                  <div className="h-8 w-px bg-white/5 hidden sm:block" />
+
+                  <label className="flex items-center gap-3 cursor-pointer group">
+                    <div className={cn(
+                      "w-5 h-5 rounded-md border flex items-center justify-center transition-all",
+                      batchSettings.removeBg ? "bg-white border-white" : "border-white/10 bg-black/50 group-hover:border-white/30"
+                    )}>
+                      <input 
+                        type="checkbox" 
+                        checked={batchSettings.removeBg}
+                        onChange={(e) => setBatchSettings(prev => ({ ...prev, removeBg: e.target.checked }))}
+                        className="hidden"
+                      />
+                      {batchSettings.removeBg && <Check className="w-3.5 h-3.5 text-black stroke-[3]" />}
+                    </div>
+                    <div className="flex flex-col">
+                      <span className="text-[10px] font-bold text-white group-hover:text-white transition-colors">Clear Cuts</span>
+                      <span className="text-[9px] text-white/40 leading-tight">Auto BG Removal</span>
+                    </div>
+                  </label>
+
+                  <label className="flex items-center gap-3 cursor-pointer group">
+                    <div className={cn(
+                      "w-5 h-5 rounded-md border flex items-center justify-center transition-all",
+                      batchSettings.autoEnv ? "bg-white border-white" : "border-white/10 bg-black/50 group-hover:border-white/30"
+                    )}>
+                      <input 
+                        type="checkbox" 
+                        checked={batchSettings.autoEnv}
+                        onChange={(e) => setBatchSettings(prev => ({ ...prev, autoEnv: e.target.checked }))}
+                        className="hidden"
+                      />
+                      {batchSettings.autoEnv && <Check className="w-3.5 h-3.5 text-black stroke-[3]" />}
+                    </div>
+                    <div className="flex flex-col">
+                      <span className="text-[10px] font-bold text-white group-hover:text-white transition-colors">Smart Scene</span>
+                      <span className="text-[9px] text-white/40 leading-tight">Auto Environment</span>
+                    </div>
+                  </label>
+
+                  <label className="flex items-center gap-3 cursor-pointer group">
+                    <div className={cn(
+                      "w-5 h-5 rounded-md border flex items-center justify-center transition-all",
+                      batchSettings.autoTryOn ? "bg-white border-white" : "border-white/10 bg-black/50 group-hover:border-white/30"
+                    )}>
+                      <input 
+                        type="checkbox" 
+                        checked={batchSettings.autoTryOn}
+                        onChange={(e) => setBatchSettings(prev => ({ ...prev, autoTryOn: e.target.checked }))}
+                        className="hidden"
+                      />
+                      {batchSettings.autoTryOn && <Check className="w-3.5 h-3.5 text-black stroke-[3]" />}
+                    </div>
+                    <div className="flex flex-col">
+                      <span className="text-[10px] font-bold text-white group-hover:text-white transition-colors">Model AI</span>
+                      <span className="text-[9px] text-white/40 leading-tight">Auto Jewelry Model</span>
+                    </div>
+                  </label>
+                </div>
+
                 {batchComplete && (
                   <motion.div 
                     initial={{ opacity: 0, y: 10 }}
@@ -1329,6 +1618,42 @@ export default function App() {
                 )}
 
                 <UploadZone onUpload={handleBatchUpload} isProcessing={isProcessing || isBatchProcessing} />
+                
+                <div className="bg-neutral-900/50 border border-neutral-800 rounded-3xl p-8 space-y-6 w-full max-w-2xl mx-auto mt-8">
+                  <h3 className="text-lg font-medium">Generate Background Image</h3>
+                  <div className="space-y-4">
+                    <input 
+                      type="text" 
+                      value={imagePrompt}
+                      onChange={(e) => setImagePrompt(e.target.value)}
+                      placeholder="e.g., A futuristic office space"
+                      className="w-full bg-neutral-800 p-3 rounded-xl text-sm"
+                    />
+                    <button 
+                      onClick={generateImageArt}
+                      disabled={isGeneratingImage}
+                      className="w-full h-12 bg-white text-black rounded-xl font-bold uppercase text-xs flex items-center justify-center gap-2 hover:bg-neutral-200 transition-colors"
+                    >
+                      {isGeneratingImage ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                      Generate
+                    </button>
+                    {generatedImage && (
+                      <div className="mt-4">
+                        <img src={generatedImage} alt="Generated" className="w-full rounded-xl" referrerPolicy="no-referrer" />
+                        <button 
+                          onClick={() => {
+                            if (generatedImage) {
+                              handleBatchUpload([base64ToFile(generatedImage, 'generated-image.jpg')]);
+                            }
+                          }}
+                          className="mt-2 w-full text-xs underline"
+                        >
+                          Use this image
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
               </section>
 
               {/* Projects Feed */}
@@ -1361,13 +1686,26 @@ export default function App() {
                     </div>
                   </div>
 
+                  <div className="flex items-center gap-4 mb-6">
+                    <select 
+                      value={projectCategory}
+                      onChange={(e) => setProjectCategory(e.target.value)}
+                      className="bg-neutral-900 border border-neutral-800 text-white text-sm rounded-lg p-2 focus:ring-2 focus:ring-neutral-700"
+                    >
+                      {['All', ...Array.from(new Set(projects.map(p => p.category || 'Uncategorized')))].map(c => (
+                        <option key={c} value={c}>{c}</option>
+                      ))}
+                    </select>
+                  </div>
+
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-                    {projects.map(project => {
+                    {projects.filter(p => projectCategory === 'All' || (p.category || 'Uncategorized') === projectCategory).map(project => {
                       const template = templates.find(t => t.id === project.templateId);
                       return (
                         <ProjectCard 
                           key={project.id}
                           {...project}
+                          category={project.category}
                           templateName={project.templateName || template?.name}
                           onDelete={deleteProject}
                           onClick={() => {
@@ -1381,7 +1719,8 @@ export default function App() {
                 </section>
               )}
             </motion.div>
-          ) : (
+          )}
+          {view === 'editor' && (
             <motion.div 
               key="editor"
               initial={{ opacity: 0, x: 20 }}
@@ -1401,6 +1740,18 @@ export default function App() {
                   </button>
                   
                   <div className="flex items-center gap-4">
+                    <input 
+                      type="text" 
+                      value={currentProject?.category || 'Uncategorized'}
+                      onChange={(e) => {
+                        if (currentProject) {
+                           setProjects(prev => prev.map(p => p.id === currentProject.id ? {...p, category: e.target.value} : p));
+                           setCurrentProject({...currentProject, category: e.target.value});
+                        }
+                      }}
+                      className="bg-neutral-900 border border-neutral-800 text-white text-sm rounded-lg p-2 focus:ring-2 focus:ring-neutral-700 w-32"
+                      placeholder="Category"
+                    />
                     <button 
                       onClick={() => currentProject && deleteProject(currentProject.id)}
                       className="p-2 rounded-lg bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-all"
@@ -1653,24 +2004,85 @@ export default function App() {
                     </div>
 
                     <div className="grid grid-cols-2 gap-2">
-                      {presetEnvironments
-                        .filter(p => selectedEnvCategory === 'All' || p.category === selectedEnvCategory)
-                        .map((preset) => (
-                          <button
-                            key={preset.name}
-                            onClick={() => generateEnvironment(preset.prompt)}
-                            disabled={isGeneratingEnv}
-                            className="group relative h-20 rounded-xl overflow-hidden border border-neutral-800 hover:border-neutral-600 transition-all"
-                          >
-                            <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent z-10" />
-                            <div className="absolute inset-0 bg-neutral-800 group-hover:scale-110 transition-transform duration-500" />
-                            <div className="absolute bottom-2 left-2 right-2 z-20">
-                              <p className="text-[10px] font-bold uppercase tracking-wider text-white truncate">{preset.name}</p>
-                              <p className="text-[8px] text-neutral-400 uppercase tracking-tighter">{preset.category}</p>
-                            </div>
-                          </button>
-                        ))}
+                      {currentTemplate.id === 'home' && (
+                        <button
+                          onClick={() => setShowInteriorCamera(true)}
+                          className="col-span-2 flex items-center justify-center gap-2 h-12 rounded-xl bg-neutral-900 border border-neutral-800 hover:border-neutral-600 transition-all font-bold text-xs uppercase"
+                        >
+                          <Camera className="w-4 h-4" />
+                          Take room photo
+                        </button>
+                      )}
+                      <EnvironmentGallery 
+                        presets={presetEnvironments.map(p => ({ ...p, image: ''}))}
+                        selectedCategory={selectedEnvCategory}
+                        onSelect={generateEnvironment}
+                        isGenerating={isGeneratingEnv}
+                      />
                     </div>
+                  </div>
+                </div>
+
+                {showInteriorCamera && (
+                  <CameraModal 
+                    onCapture={(file) => handleBatchUpload([file])} 
+                    onClose={() => setShowInteriorCamera(false)} 
+                  />
+                )}
+
+                <div className="bg-neutral-900/50 border border-neutral-800 rounded-3xl p-8 space-y-6">
+                  <h3 className="text-lg font-medium">Image Generation</h3>
+                  <div className="space-y-4">
+                    <input 
+                      type="text" 
+                      value={imagePrompt}
+                      onChange={(e) => setImagePrompt(e.target.value)}
+                      placeholder="e.g., A futuristic office space"
+                      className="w-full bg-neutral-800 p-3 rounded-xl text-sm"
+                    />
+                    <button 
+                      onClick={generateImageArt}
+                      disabled={isGeneratingImage}
+                      className="w-full h-12 bg-white text-black rounded-xl font-bold uppercase text-xs flex items-center justify-center gap-2 hover:bg-neutral-200 transition-colors"
+                    >
+                      {isGeneratingImage ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                      Generate
+                    </button>
+                    {generatedImage && (
+                      <div className="mt-4">
+                        <img src={generatedImage} alt="Generated" className="w-full rounded-xl" referrerPolicy="no-referrer" />
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Watermark Settings */}
+                <div className="bg-neutral-900/50 border border-neutral-800 rounded-3xl p-8 space-y-6">
+                  <h3 className="text-lg font-medium">Watermark Settings</h3>
+                  <div className="space-y-4">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" checked={!watermarkOptions.disabled} onChange={(e) => setWatermarkOptions(prev => ({ ...prev, disabled: !e.target.checked }))} />
+                      <span className="text-sm">Enable Watermark</span>
+                    </label>
+                    <input type="text" value={watermarkOptions.text} onChange={(e) => setWatermarkOptions(prev => ({ ...prev, text: e.target.value }))} className="w-full bg-neutral-800 p-2 rounded-lg text-sm" placeholder="Watermark Text" />
+                    
+                    <div className="grid grid-cols-2 gap-2">
+                       <select value={watermarkOptions.placement} onChange={(e) => setWatermarkOptions(prev => ({ ...prev, placement: e.target.value as any }))} className="bg-neutral-800 p-2 rounded-lg text-sm">
+                         {['center', 'top-left', 'top-right', 'bottom-left', 'bottom-right'].map(p => <option key={p} value={p}>{p}</option>)}
+                       </select>
+                       <input type="number" min="1" max="20" value={watermarkOptions.size} onChange={(e) => setWatermarkOptions(prev => ({ ...prev, size: parseInt(e.target.value) }))} className="bg-neutral-800 p-2 rounded-lg text-sm" placeholder="Size" />
+                    </div>
+                     <div className="grid grid-cols-2 gap-2">
+                       <select value={watermarkOptions.fontWeight} onChange={(e) => setWatermarkOptions(prev => ({ ...prev, fontWeight: e.target.value as any }))} className="bg-neutral-800 p-2 rounded-lg text-sm">
+                         <option value="normal">Normal</option>
+                         <option value="bold">Bold</option>
+                       </select>
+                        <select value={watermarkOptions.fontStyle} onChange={(e) => setWatermarkOptions(prev => ({ ...prev, fontStyle: e.target.value as any }))} className="bg-neutral-800 p-2 rounded-lg text-sm">
+                         <option value="normal">Normal</option>
+                         <option value="italic">Italic</option>
+                       </select>
+                    </div>
+                    <input type="text" value={watermarkOptions.fontFamily} onChange={(e) => setWatermarkOptions(prev => ({ ...prev, fontFamily: e.target.value }))} className="w-full bg-neutral-800 p-2 rounded-lg text-sm" placeholder="Font Family (e.g., Arial, sans-serif)" />
                   </div>
                 </div>
 
@@ -1850,14 +2262,25 @@ export default function App() {
                     <div className="flex gap-3">
                     <button 
                       onClick={tryOnModel}
-                      disabled={isTryingOn}
+                      disabled={isTryingOn || !currentProject?.enhancedImage}
                       className={cn(
                         "flex-1 py-4 rounded-2xl bg-white text-black font-bold hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-2",
-                        isTryingOn && "opacity-50 cursor-not-allowed"
+                        (isTryingOn || !currentProject?.enhancedImage) && "opacity-50 cursor-not-allowed"
                       )}
                     >
                       <Sparkles className={cn("w-4 h-4", isTryingOn && "animate-spin")} />
                       {currentProject?.tryOnImage ? "Re-generate" : "Generate Shot"}
+                    </button>
+                    <button 
+                      onClick={generateVideoHandler}
+                      disabled={isGeneratingVideo || !currentProject}
+                      className={cn(
+                        "flex-1 py-4 rounded-2xl bg-white text-black font-bold hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-2",
+                        (isGeneratingVideo || !currentProject) && "opacity-50 cursor-not-allowed"
+                      )}
+                    >
+                      <Video className={cn("w-4 h-4", isGeneratingVideo && "animate-spin")} />
+                      <span>{isGeneratingVideo ? "Generating..." : "Generate Video"}</span>
                     </button>
                     <button 
                       onClick={generateModelVariations}
@@ -1946,7 +2369,7 @@ export default function App() {
                   <div className="space-y-6">
                     <div className="space-y-3">
                       <div className="flex justify-between items-center">
-                        <label className="text-[10px] uppercase tracking-widest font-bold text-neutral-500">Brightness</label>
+                        <label className="text-[10px] uppercase tracking-widest font-bold text-neutral-500" title="Adjusts the overall lightness or darkness of the image">Brightness</label>
                         <span className="text-[10px] font-mono text-neutral-400">{filters.brightness}%</span>
                       </div>
                       <input 
@@ -1961,7 +2384,7 @@ export default function App() {
 
                     <div className="space-y-3">
                       <div className="flex justify-between items-center">
-                        <label className="text-[10px] uppercase tracking-widest font-bold text-neutral-500">Contrast</label>
+                        <label className="text-[10px] uppercase tracking-widest font-bold text-neutral-500" title="Adjusts the separation between dark and light areas">Contrast</label>
                         <span className="text-[10px] font-mono text-neutral-400">{filters.contrast}%</span>
                       </div>
                       <input 
@@ -1976,7 +2399,7 @@ export default function App() {
 
                     <div className="space-y-3">
                       <div className="flex justify-between items-center">
-                        <label className="text-[10px] uppercase tracking-widest font-bold text-neutral-500">Saturation</label>
+                        <label className="text-[10px] uppercase tracking-widest font-bold text-neutral-500" title="Adjusts the intensity of colors">Saturation</label>
                         <span className="text-[10px] font-mono text-neutral-400">{filters.saturate}%</span>
                       </div>
                       <input 
@@ -1991,7 +2414,7 @@ export default function App() {
 
                     <div className="space-y-3">
                       <div className="flex justify-between items-center">
-                        <label className="text-[10px] uppercase tracking-widest font-bold text-neutral-500">Sharpen</label>
+                        <label className="text-[10px] uppercase tracking-widest font-bold text-neutral-500" title="Enhances the fine details of the image">Sharpen</label>
                         <span className="text-[10px] font-mono text-neutral-400">{filters.sharpen}%</span>
                       </div>
                       <input 
@@ -2002,6 +2425,65 @@ export default function App() {
                         onChange={(e) => setFilters(prev => ({ ...prev, sharpen: parseInt(e.target.value) }))}
                         className="w-full h-1.5 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-white"
                       />
+                    </div>
+
+                    <div className="space-y-6 mt-8 pt-8 border-t border-neutral-800">
+                      <h3 className="text-lg font-medium">Watermark</h3>
+                      
+                      <div className="space-y-4">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input type="checkbox" checked={!watermarkOptions.disabled} onChange={(e) => setWatermarkOptions(prev => ({...prev, disabled: !e.target.checked}))} className="accent-white" />
+                          <span className="text-sm">Enable Watermark</span>
+                        </label>
+                        
+                        {!watermarkOptions.disabled && (
+                          <>
+                            <label className="block text-sm">
+                              <span className="text-[10px] uppercase tracking-widest font-bold text-neutral-500">Text</span>
+                              <input type="text" value={watermarkOptions.text} onChange={(e) => setWatermarkOptions(prev => ({...prev, text: e.target.value}))} className="w-full bg-neutral-800 p-2 rounded text-sm mt-1" />
+                            </label>
+                            
+                            <label className="block text-sm">
+                              <span className="text-[10px] uppercase tracking-widest font-bold text-neutral-500">Placement</span>
+                              <select value={watermarkOptions.placement} onChange={(e) => setWatermarkOptions(prev => ({...prev, placement: e.target.value as any}))} className="w-full bg-neutral-800 p-2 rounded text-sm mt-1">
+                                <option value="center">Center</option>
+                                <option value="top-left">Top Left</option>
+                                <option value="top-right">Top Right</option>
+                                <option value="bottom-left">Bottom Left</option>
+                                <option value="bottom-right">Bottom Right</option>
+                              </select>
+                            </label>
+                            
+                            <label className="block text-sm">
+                              <span className="text-[10px] uppercase tracking-widest font-bold text-neutral-500">Opacity: {watermarkOptions.opacity}%</span>
+                              <input type="range" min="0" max="100" value={watermarkOptions.opacity} onChange={(e) => setWatermarkOptions(prev => ({...prev, opacity: parseInt(e.target.value)}))} className="w-full h-1.5 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-white mt-2" />
+                            </label>
+                            
+                            <label className="block text-sm">
+                              <span className="text-[10px] uppercase tracking-widest font-bold text-neutral-500">Size: {watermarkOptions.size}%</span>
+                              <input type="range" min="1" max="20" value={watermarkOptions.size} onChange={(e) => setWatermarkOptions(prev => ({...prev, size: parseInt(e.target.value)}))} className="w-full h-1.5 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-white mt-2" />
+                            </label>
+
+                            <label className="block text-sm">
+                              <span className="text-[10px] uppercase tracking-widest font-bold text-neutral-500">Font Weight</span>
+                              <select value={watermarkOptions.fontWeight} onChange={(e) => setWatermarkOptions(prev => ({...prev, fontWeight: e.target.value as any}))} className="w-full bg-neutral-800 p-2 rounded text-sm mt-1">
+                                <option value="normal">Normal</option>
+                                <option value="bold">Bold</option>
+                              </select>
+                            </label>
+
+                            <label className="block text-sm">
+                              <span className="text-[10px] uppercase tracking-widest font-bold text-neutral-500">Font Family</span>
+                              <select value={watermarkOptions.fontFamily} onChange={(e) => setWatermarkOptions(prev => ({...prev, fontFamily: e.target.value}))} className="w-full bg-neutral-800 p-2 rounded text-sm mt-1">
+                                <option value="Arial">Arial</option>
+                                <option value="Times New Roman">Times New Roman</option>
+                                <option value="Courier New">Courier New</option>
+                                <option value="Georgia">Georgia</option>
+                              </select>
+                            </label>
+                          </>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>
